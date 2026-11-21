@@ -1,0 +1,810 @@
+From 57955c68ae88976af04e52dd37735939bd380393 Mon Sep 17 00:00:00 2001
+From: deta ssaoui <detassaoui@gmail.com>
+Date: Sat, 21 Nov 2026 22:50:55 +0000
+Subject: [PATCH] Persist demo bookings with Supabase Auth
+
+---
+ .env.example                                  |   2 +
+ .gitignore                                    |   2 +
+ README.md                                     |  13 +-
+ app/page.tsx                                  | 230 ++++++++++++++++--
+ app/style.css                                 |   7 +
+ docs/architecture-v2.md                       |   2 +-
+ docs/database-plan.md                         |   2 +-
+ lib/supabase.ts                               |  17 ++
+ package-lock.json                             | 132 ++++++++++
+ package.json                                  |   1 +
+ .../migrations/20261121000100_bookings.sql    | 120 +++++++++
+ supabase/tests/bookings.sql                   |  79 ++++++
+ 12 files changed, 582 insertions(+), 25 deletions(-)
+ create mode 100644 .env.example
+ create mode 100644 lib/supabase.ts
+ create mode 100644 supabase/migrations/20261121000100_bookings.sql
+ create mode 100644 supabase/tests/bookings.sql
+
+diff --git a/.env.example b/.env.example
+new file mode 100644
+index 0000000..7856b65
+--- /dev/null
++++ b/.env.example
+@@ -0,0 +1,2 @@
++NEXT_PUBLIC_SUPABASE_URL=
++NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY=
+diff --git a/.gitignore b/.gitignore
+index 645d732..1199055 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -4,3 +4,5 @@ node_modules/
+ .next/
+ next-env.d.ts
+ *.tsbuildinfo
++
++.env.local
+diff --git a/README.md b/README.md
+index 7c69509..397492c 100644
+--- a/README.md
++++ b/README.md
+@@ -14,7 +14,7 @@ npm ci
+ npm run dev
+ ```
+ 
+-Open http://localhost:3000. The demo operates entirely in the browser. It uses fixed landmarks, schematic routes and synthetic prices. A reload clears the ride. The app includes a PWA manifest and icons. Offline operation is pending.
++Open http://localhost:3000. With no Supabase configuration, the demo runs in the browser and a reload clears the ride. Both modes use fixed landmarks, schematic routes and synthetic prices. The app includes a PWA manifest and icons. Offline operation is pending.
+ 
+ The earlier Fastify health API is available separately via `PORT=3001 npm run api:dev`. The demo UI has no dependency on that server.
+ 
+@@ -25,3 +25,14 @@ npm run typecheck
+ npm test
+ npm run build
+ ```
++
++## Save demo rides with Supabase
++
++1. Use a development Supabase project with email/password Auth enabled. Add the app origin, such as `http://localhost:3000`, to the allowed Auth redirect URLs.
++2. Apply [the booking migration](supabase/migrations/20261121000100_bookings.sql) using the Supabase migration workflow (or run the SQL once in the project's SQL Editor). It expects PostGIS in the Supabase `extensions` schema.
++3. Copy `.env.example` to `.env.local` and enter the project URL and **publishable** key. Restart the dev server, or rebuild for a production build. Keep secret and service-role keys out of browser variables.
++4. Create an account, confirm the email if required, sign in and book a demo ride. Refresh the page to resume the latest ride or select one of the 50 most recent saved rides. Without Supabase configuration, the original browser-only demo remains available.
++
++Supabase stores bookings and simulated trip status. It calculates the demo price from fixed landmark IDs. Passenger identity comes from the Auth token, and row-level security limits booking reads to the owner. Routes and trip progression are simulated. The app performs no dispatch or payments.
++
++Run the database integration assertions against a disposable Supabase database with the migration applied using `psql -f supabase/tests/bookings.sql` with the test database connection configured. The fixture creates two users within a transaction and rolls back.
+diff --git a/app/page.tsx b/app/page.tsx
+index 4437f9a..980488c 100644
+--- a/app/page.tsx
++++ b/app/page.tsx
+@@ -1,6 +1,9 @@
+ 'use client';
+ 
+-import { useEffect, useState } from 'react';
++import { useEffect, useRef, useState } from 'react';
++import type { Session } from '@supabase/supabase-js';
++import { bookingFields, supabase } from '../lib/supabase';
++import type { SavedBooking } from '../lib/supabase';
+ import { nextStatus, places, quoteRide, steps } from '../lib/demo';
+ import type { Quote, Status } from '../lib/demo';
+ 
+@@ -34,19 +37,194 @@ const translations = [
+   },
+ ] as const;
+ 
++const accountLabels = [
++  { email: 'Email', password: 'Password', signIn: 'Sign in', signUp: 'Create account', signOut: 'Sign out',
++    verify: 'Check your email for a confirmation link, then sign in.',
++    failed: 'The request failed. Try again.', loading: 'Loading your account…', history: 'Your saved rides',
++    retry: 'Retry', saved: 'Rides are saved in your account. Routes, prices and tracking are simulated.' },
++  { email: 'Adresse e-mail', password: 'Mot de passe', signIn: 'Se connecter', signUp: 'Créer un compte',
++    signOut: 'Se déconnecter', verify: 'Confirmez votre adresse e-mail, puis connectez-vous.',
++    failed: 'La demande a échoué. Réessayez.', loading: 'Chargement de votre compte…', history: 'Vos trajets enregistrés',
++    retry: 'Réessayer', saved: 'Les trajets sont enregistrés. Les itinéraires, tarifs et le suivi sont simulés.' },
++  { email: 'البريد الإلكتروني', password: 'كلمة المرور', signIn: 'تسجيل الدخول', signUp: 'إنشاء حساب',
++    signOut: 'تسجيل الخروج', verify: 'أكّد بريدك الإلكتروني ثم سجّل الدخول.',
++    failed: 'تعذّر إتمام الطلب. حاول مرة أخرى.', loading: 'جارٍ تحميل حسابك…', history: 'رحلاتك المحفوظة',
++    retry: 'إعادة المحاولة', saved: 'تُحفظ الرحلات في حسابك. المسارات والأسعار والتتبع محاكاة.' },
++] as const;
++
+ export default function Home() {
+   const [locale, setLocale] = useState(0);
++  const [session, setSession] = useState<Session | null | undefined>(supabase ? undefined : null);
++  const [email, setEmail] = useState('');
++  const [password, setPassword] = useState('');
++  const [authNotice, setAuthNotice] = useState<'failed' | 'verify' | null>(null);
++  const [authBusy, setAuthBusy] = useState(false);
++  const t = translations[locale];
++  const account = accountLabels[locale];
++
++  useEffect(() => {
++    document.documentElement.lang = t.lang;
++    document.documentElement.dir = t.dir;
++  }, [t.lang, t.dir]);
++
++  useEffect(() => {
++    const subscription = supabase?.auth.onAuthStateChange((_event, next) => setSession(next));
++    return () => subscription?.data.subscription.unsubscribe();
++  }, []);
++
++  async function authenticate(create: boolean) {
++    if (!supabase) return;
++    setAuthBusy(true);
++    setAuthNotice(null);
++    try {
++      const credentials = { email: email.trim(), password };
++      const result = create
++        ? await supabase.auth.signUp({
++            ...credentials,
++            options: { emailRedirectTo: window.location.origin },
++          })
++        : await supabase.auth.signInWithPassword(credentials);
++      if (result.error) throw result.error;
++      setPassword('');
++      if (create && !result.data.session) setAuthNotice('verify');
++    } catch {
++      setAuthNotice('failed');
++    } finally {
++      setAuthBusy(false);
++    }
++  }
++
++  async function signOut() {
++    setAuthBusy(true);
++    setAuthNotice(null);
++    try {
++      const result = await supabase?.auth.signOut({ scope: 'local' });
++      if (result?.error) throw result.error;
++    } catch {
++      setAuthNotice('failed');
++    } finally {
++      setAuthBusy(false);
++    }
++  }
++
++  return (
++    <main>
++      <header>
++        <strong className="brand">RideFlow<span>.</span></strong>
++        <label className="locale">
++          <span className="sr-only">Language / Langue / اللغة</span>
++          <select value={locale} onChange={(event) => setLocale(Number(event.target.value))}>
++            <option value={0}>English</option><option value={1}>Français</option><option value={2}>العربية</option>
++          </select>
++        </label>
++      </header>
++      {session && <button className="account-action" disabled={authBusy} onClick={signOut}>{account.signOut}</button>}
++      {authNotice && <p role={authNotice === 'failed' ? 'alert' : 'status'}>{account[authNotice]}</p>}
++      {session === undefined ? <p role="status">{account.loading}</p> : supabase && !session ? (
++        <section className="panel account-panel">
++          <h1>{account.signIn}</h1>
++          <form onSubmit={(event) => {
++            event.preventDefault();
++            const submitter = (event.nativeEvent as SubmitEvent).submitter;
++            void authenticate(submitter?.getAttribute('value') === 'create');
++          }}>
++            <label>{account.email}<input type="email" autoComplete="email" required value={email}
++              onChange={(event) => setEmail(event.target.value)} /></label>
++            <label>{account.password}<input type="password" autoComplete="current-password" required value={password}
++              onChange={(event) => setPassword(event.target.value)} /></label>
++            <button disabled={authBusy}>{account.signIn}</button>
++            <button disabled={authBusy} value="create">{account.signUp}</button>
++          </form>
++        </section>
++      ) : <RideFlow key={session?.user.id ?? 'demo'} locale={locale} userId={session?.user.id} />}
++    </main>
++  );
++}
++
++function RideFlow({ locale, userId }: { locale: number; userId?: string }) {
+   const [pickup, setPickup] = useState<string>('port');
+   const [dropoff, setDropoff] = useState<string>('maarif');
+   const [quote, setQuote] = useState<Quote | null>(null);
+   const [status, setStatus] = useState<Status | null>(null);
+   const [invalid, setInvalid] = useState(false);
++  const [bookings, setBookings] = useState<SavedBooking[]>([]);
++  const [selected, setSelected] = useState<string | null>(null);
++  const [busy, setBusy] = useState(false);
++  const [failed, setFailed] = useState(false);
++  const [retry, setRetry] = useState(0);
++  const [historyState, setHistoryState] = useState<'loading' | 'ready' | 'failed'>(userId ? 'loading' : 'ready');
++  const requestId = useRef<string | null>(null);
+   const t = translations[locale];
++  const account = accountLabels[locale];
++
++  function openBooking(booking: SavedBooking) {
++    setPickup(booking.pickup_id);
++    setDropoff(booking.dropoff_id);
++    setSelected(booking.id);
++    setStatus(booking.status);
++    setQuote(null);
++    setFailed(false);
++    setInvalid(false);
++    requestId.current = null;
++  }
+ 
+   useEffect(() => {
+-    document.documentElement.lang = t.lang;
+-    document.documentElement.dir = t.dir;
+-  }, [t.lang, t.dir]);
++    if (!userId || !supabase) return;
++    let ignore = false;
++    void (async () => {
++      try {
++        const result = await supabase!.from('passenger_bookings').select(bookingFields)
++          .eq('passenger_id', userId).order('created_at', { ascending: false })
++          .order('id', { ascending: false }).limit(50);
++        if (result.error) throw result.error;
++        if (ignore) return;
++        const saved = result.data as SavedBooking[];
++        setBookings(saved);
++        if (saved[0]) openBooking(saved[0]);
++        setHistoryState('ready');
++      } catch {
++        if (!ignore) setHistoryState('failed');
++      }
++    })();
++    return () => { ignore = true; };
++  }, [userId, retry]);
++
++  async function saveProgress() {
++    if (!userId || !supabase) {
++      setStatus(status ? nextStatus(status) : 'confirmed');
++      return;
++    }
++    setBusy(true);
++    setFailed(false);
++    try {
++      requestId.current ??= crypto.randomUUID();
++      const result = selected && status
++        ? await supabase.rpc('advance_demo_booking', {
++            p_booking_id: selected, p_expected_status: status,
++          }).select(bookingFields).single()
++        : await supabase.rpc('confirm_demo_booking', {
++            p_request_id: requestId.current, p_pickup_id: pickup, p_dropoff_id: dropoff,
++          }).select(bookingFields).single();
++      if (result.error) throw result.error;
++      const saved = result.data as SavedBooking;
++      setBookings((previous) => selected
++        ? previous.map((booking) => booking.id === saved.id ? saved : booking)
++        : [saved, ...previous.filter((booking) => booking.id !== saved.id)].slice(0, 50));
++      openBooking(saved);
++    } catch {
++      setFailed(true);
++    } finally {
++      setBusy(false);
++    }
++  }
++
++  function resetRide() {
++    setStatus(null);
++    setSelected(null);
++    setQuote(null);
++    setFailed(false);
++    requestId.current = null;
++  }
+ 
+   const start = places.find((place) => place.id === pickup)!;
+   const end = places.find((place) => place.id === dropoff)!;
+@@ -56,37 +234,35 @@ export default function Home() {
+     new Intl.NumberFormat(t.lang, { style: 'currency', currency: 'MAD' }).format(minor / 100);
+ 
+   function selectPoint(setPoint: (id: string) => void, id: string) {
++    requestId.current = null;
++    setFailed(false);
+     setPoint(id);
+     setQuote(null);
+     setInvalid(false);
+   }
+ 
+   return (
+-    <main>
+-      <header>
+-        <strong className="brand">RideFlow<span>.</span></strong>
+-        <label className="locale">
+-          <span className="sr-only">Language / Langue / اللغة</span>
+-          <select value={locale} onChange={(event) => setLocale(Number(event.target.value))}>
+-            <option value={0}>English</option><option value={1}>Français</option><option value={2}>العربية</option>
+-          </select>
+-        </label>
+-      </header>
++    <div>
++      {historyState === 'loading' && <p role="status">{account.loading}</p>}
++      {historyState === 'failed' && <div><p role="alert">{account.failed}</p>
++        <button className="account-action" onClick={() => { setHistoryState('loading'); setRetry(retry + 1); }}>{account.retry}</button>
++      </div>}
+       <div className="workspace">
+         <section className="panel">
+           <p className="context">{t.demo}</p>
+           <h1>{t.title}</h1>
+-          <p className="note">{t.note}</p>
+-          {!status && <form onSubmit={(event) => {
++          <p className="note">{userId ? account.saved : t.note}</p>
++          {failed && <p role="alert" className="error">{account.failed}</p>}
++          {!status && historyState === 'ready' && <form onSubmit={(event) => {
+             event.preventDefault();
+             const estimate = quoteRide(pickup, dropoff);
+             setQuote(estimate);
+             setInvalid(estimate === null);
+           }}>
+-            <label>{t.pickup}<select value={pickup} onChange={(event) => selectPoint(setPickup, event.target.value)}>
++            <label>{t.pickup}<select disabled={busy} value={pickup} onChange={(event) => selectPoint(setPickup, event.target.value)}>
+               {places.map((place) => <option key={place.id} value={place.id}>{place.names[locale]}</option>)}
+             </select></label>
+-            <label>{t.dropoff}<select value={dropoff} onChange={(event) => selectPoint(setDropoff, event.target.value)}>
++            <label>{t.dropoff}<select disabled={busy} value={dropoff} onChange={(event) => selectPoint(setDropoff, event.target.value)}>
+               {places.map((place) => <option key={place.id} value={place.id}>{place.names[locale]}</option>)}
+             </select></label>
+             {invalid && <p role="alert" className="error">{t.valid}</p>}
+@@ -99,14 +275,14 @@ export default function Home() {
+               <div><dt>{t.distance}</dt><dd>{money(quote.distanceMinor)}</dd></div>
+               <div className="total"><dt>{t.total}</dt><dd>{money(quote.totalMinor)}</dd></div>
+             </dl>
+-            <button onClick={() => setStatus('confirmed')}>{t.confirm}</button>
++            <button disabled={busy} onClick={saveProgress}>{t.confirm}</button>
+           </div>}
+           {status && <div className="details">
+             <p aria-live="polite" className="current">{t.statuses[steps.indexOf(status)]}</p>
+             <ol>{steps.map((step, index) => <li key={step} aria-current={step === status ? 'step' : undefined}>{t.statuses[index]}</li>)}</ol>
+             {status === 'completed'
+-              ? <button onClick={() => { setStatus(null); setQuote(null); }}>{t.restart}</button>
+-              : <button onClick={() => setStatus(nextStatus(status))}>{t.progress}</button>}
++              ? <button onClick={resetRide}>{t.restart}</button>
++              : <button disabled={busy} onClick={saveProgress}>{t.progress}</button>}
+           </div>}
+         </section>
+         <figure className="map">
+@@ -124,6 +300,16 @@ export default function Home() {
+           </div>
+         </figure>
+       </div>
+-    </main>
++      {bookings.length > 0 && <section className="panel history">
++        <h2>{account.history}</h2>
++        <ul>{bookings.map((booking) => (
++          <li key={booking.id}><button disabled={busy} onClick={() => openBooking(booking)}>
++            {places.find((place) => place.id === booking.pickup_id)?.names[locale]} → {places.find((place) => place.id === booking.dropoff_id)?.names[locale]}
++            {' · '}{new Intl.DateTimeFormat(t.lang, { dateStyle: 'medium', timeStyle: 'short', timeZone: 'Africa/Casablanca' }).format(new Date(booking.created_at))}
++            {' · '}{t.statuses[steps.indexOf(booking.status)]}
++          </button></li>
++        ))}</ul>
++      </section>}
++    </div>
+   );
+ }
+diff --git a/app/style.css b/app/style.css
+index 1ac385e..9046e75 100644
+--- a/app/style.css
++++ b/app/style.css
+@@ -36,3 +36,10 @@ figcaption{padding:15px 19px;font-weight:650;background:#fff}
+ .place{color:#172b25;background:#fffffff2;padding:2px 5px;border-radius:4px;font-size:clamp(.65rem,1.4vw,.82rem);text-align:center}
+ .sr-only{position:absolute;width:1px;height:1px;overflow:hidden;clip-path:inset(50%)}
+ @media(max-width:730px){.workspace{grid-template-columns:1fr}.map{grid-row:1}.panel{padding:20px}header{margin-bottom:16px}}
++input{font:inherit;width:100%;padding:12px;border:1px solid #b9c7bf;border-radius:8px;color:inherit}
++button:disabled{opacity:.65;cursor:wait}
++.account-panel{max-width:470px}
++.account-action{width:auto;margin-bottom:16px}
++.history{margin-top:18px}
++.history ul{margin:0;padding:0;list-style:none;display:grid;gap:8px}
++.history button{text-align:start}
+diff --git a/docs/architecture-v2.md b/docs/architecture-v2.md
+index 4fc0c30..60a274c 100644
+--- a/docs/architecture-v2.md
++++ b/docs/architecture-v2.md
+@@ -51,4 +51,4 @@ Use named commands with actor, expected state/version, timestamps, reason and id
+ 
+ ## Delivery status
+ 
+-The first milestone implements a demo quote, confirmation and tracking flow for one passenger. Routes, fares and the vehicle lifecycle are simulated. The live Supabase, Mapbox, verified taxi, real-time operator, payment and identity integrations are incomplete. Multi-stop, scheduled, recurring and shared journeys are specified here for later milestones. Live dispatch and charging remain blocked pending verified rules, appropriate agreements, privacy review and operational testing.
++The first milestone implements a demo quote, confirmation and tracking flow for one passenger. Routes, fares and the vehicle lifecycle are simulated. With a configured Supabase project, passengers can sign in, save a demo booking, and resume simulated tracking after reload. Live Mapbox routing, verified taxi dispatch, real-time operator activity and payments are incomplete. Multi-stop, scheduled, recurring and shared journeys are specified here for later milestones. Live dispatch and charging remain blocked pending verified rules, appropriate agreements, privacy review and operational testing.
+diff --git a/docs/database-plan.md b/docs/database-plan.md
+index 36467e5..8be92a5 100644
+--- a/docs/database-plan.md
++++ b/docs/database-plan.md
+@@ -39,4 +39,4 @@ Use UUID business identifiers, UTC timestamp columns and foreign keys on all rel
+ 5. Add pooling and ledger tables. Race allocations on overlapping and disjoint segments. Test consent revocation, unauthorized fare augmentation and idempotent payment posting.
+ 6. Promote migrations from an empty test DB and from a representative previous revision. Back up before promotion, check index locks and RLS, and use additive compatibility changes followed by backfill and validation. Keep destructive cleanup in a separately reviewed release.
+ 
+-This is a migration design. The demo milestone does not create or migrate a Supabase database.
++The booking milestone ships an initial migration for PostGIS landmarks, passenger-owned demo bookings and restricted confirmation and tracking RPCs. The production relations above are a migration design for later phases.
+diff --git a/lib/supabase.ts b/lib/supabase.ts
+new file mode 100644
+index 0000000..9d78885
+--- /dev/null
++++ b/lib/supabase.ts
+@@ -0,0 +1,17 @@
++import { createClient } from '@supabase/supabase-js';
++import type { Status } from './demo';
++
++const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
++const key = process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY;
++
++export const supabase = url && key ? createClient(url, key) : null;
++
++export type SavedBooking = {
++  id: string;
++  pickup_id: string;
++  dropoff_id: string;
++  status: Status;
++  created_at: string;
++};
++
++export const bookingFields = 'id,pickup_id,dropoff_id,status,created_at';
+diff --git a/package-lock.json b/package-lock.json
+index 954e6fe..2e5c597 100644
+--- a/package-lock.json
++++ b/package-lock.json
+@@ -8,6 +8,7 @@
+       "name": "rides-service",
+       "version": "0.1.0",
+       "dependencies": {
++        "@supabase/supabase-js": "^2.119.2",
+         "fastify": "^5.12.8",
+         "next": "^16.4.6",
+         "react": "^19.3.1",
+@@ -861,6 +862,128 @@
+       "integrity": "sha512-k2ENnmBugE/rzQfEcdWHcCY+/FM3VLzH9cYEsbdsoqrvzAKRhUZeRNhAZvB8OitQJ1TBed3yqWtdjzS6wJKBwg==",
+       "license": "MIT"
+     },
++    "node_modules/@supabase/auth-js": {
++      "version": "2.119.2",
++      "resolved": "https://registry.npmjs.org/@supabase/auth-js/-/auth-js-2.119.2.tgz",
++      "integrity": "sha512-zWi7pGT6XIMWG0Ja5Unvsv9ixwgLTq/pnWNzGVwVXlr/onraf3v4VwepCFSlxGrvNyKRmhn7O6e4CHF1TJg73Q==",
++      "license": "MIT",
++      "dependencies": {
++        "tslib": "2.8.1"
++      },
++      "engines": {
++        "node": ">=22.0.0"
++      }
++    },
++    "node_modules/@supabase/auth-js/node_modules/tslib": {
++      "version": "2.8.1",
++      "resolved": "https://registry.npmjs.org/tslib/-/tslib-2.8.1.tgz",
++      "integrity": "sha512-oJFu94HQb+KVduSUQL7wnpmqnfmLsOA/nAh6b6EH0wCEoK0/mPeXU6c3wKDV83MkOuHPRHtSXKKU99IBazS/2w==",
++      "license": "0BSD"
++    },
++    "node_modules/@supabase/functions-js": {
++      "version": "2.119.2",
++      "resolved": "https://registry.npmjs.org/@supabase/functions-js/-/functions-js-2.119.2.tgz",
++      "integrity": "sha512-0pmNQRKahGbezgUV2m02l7j4t0Wdl7KMNNMWGCMe76beA7e1IfTPihtNssqWWw1IjqMDi0axoqLiDPzcdbPuGw==",
++      "license": "MIT",
++      "dependencies": {
++        "tslib": "2.8.1"
++      },
++      "engines": {
++        "node": ">=22.0.0"
++      }
++    },
++    "node_modules/@supabase/functions-js/node_modules/tslib": {
++      "version": "2.8.1",
++      "resolved": "https://registry.npmjs.org/tslib/-/tslib-2.8.1.tgz",
++      "integrity": "sha512-oJFu94HQb+KVduSUQL7wnpmqnfmLsOA/nAh6b6EH0wCEoK0/mPeXU6c3wKDV83MkOuHPRHtSXKKU99IBazS/2w==",
++      "license": "0BSD"
++    },
++    "node_modules/@supabase/phoenix": {
++      "version": "0.4.5",
++      "resolved": "https://registry.npmjs.org/@supabase/phoenix/-/phoenix-0.4.5.tgz",
++      "integrity": "sha512-aAn9H9ovVyeApKy11OWOrrOGq8DV68yWeH4ud2lN9fzn4aO8Zb5GLL9m1pUg9nLqIcT+ZDfAcsZe0E/nqdv2lw==",
++      "license": "MIT"
++    },
++    "node_modules/@supabase/postgrest-js": {
++      "version": "2.119.2",
++      "resolved": "https://registry.npmjs.org/@supabase/postgrest-js/-/postgrest-js-2.119.2.tgz",
++      "integrity": "sha512-Q5RIy5wD79jArQSID06JXqS9F+bKLcTr81Yz7hwk2qkMX4fWMru4HLvG3UvoY0FlQzjcjXqVba7+6GeaItq6UQ==",
++      "license": "MIT",
++      "dependencies": {
++        "tslib": "2.8.1"
++      },
++      "engines": {
++        "node": ">=22.0.0"
++      }
++    },
++    "node_modules/@supabase/postgrest-js/node_modules/tslib": {
++      "version": "2.8.1",
++      "resolved": "https://registry.npmjs.org/tslib/-/tslib-2.8.1.tgz",
++      "integrity": "sha512-oJFu94HQb+KVduSUQL7wnpmqnfmLsOA/nAh6b6EH0wCEoK0/mPeXU6c3wKDV83MkOuHPRHtSXKKU99IBazS/2w==",
++      "license": "0BSD"
++    },
++    "node_modules/@supabase/realtime-js": {
++      "version": "2.119.2",
++      "resolved": "https://registry.npmjs.org/@supabase/realtime-js/-/realtime-js-2.119.2.tgz",
++      "integrity": "sha512-1xHRbZ8RgKq8Qn50uNJMnBdkuzK35GQTo1hx2+bC3QvCxbzXnFkbmq2ZyT9xSjOCuLBfD5ve3ZKxJcbWefL3ow==",
++      "license": "MIT",
++      "dependencies": {
++        "@supabase/phoenix": "0.4.5",
++        "tslib": "2.8.1"
++      },
++      "engines": {
++        "node": ">=22.0.0"
++      }
++    },
++    "node_modules/@supabase/realtime-js/node_modules/tslib": {
++      "version": "2.8.1",
++      "resolved": "https://registry.npmjs.org/tslib/-/tslib-2.8.1.tgz",
++      "integrity": "sha512-oJFu94HQb+KVduSUQL7wnpmqnfmLsOA/nAh6b6EH0wCEoK0/mPeXU6c3wKDV83MkOuHPRHtSXKKU99IBazS/2w==",
++      "license": "0BSD"
++    },
++    "node_modules/@supabase/storage-js": {
++      "version": "2.119.2",
++      "resolved": "https://registry.npmjs.org/@supabase/storage-js/-/storage-js-2.119.2.tgz",
++      "integrity": "sha512-dbzPuYKYc3/HGz+cRXAK45zR5FWMEH6lr2Is13ZOExhOBCM3F0iO96Z9VuhlLA64vPLeSQP24O/jesWg1QY6fw==",
++      "license": "MIT",
++      "dependencies": {
++        "iceberg-js": "^0.8.1",
++        "tslib": "2.8.1"
++      },
++      "engines": {
++        "node": ">=22.0.0"
++      }
++    },
++    "node_modules/@supabase/storage-js/node_modules/tslib": {
++      "version": "2.8.1",
++      "resolved": "https://registry.npmjs.org/tslib/-/tslib-2.8.1.tgz",
++      "integrity": "sha512-oJFu94HQb+KVduSUQL7wnpmqnfmLsOA/nAh6b6EH0wCEoK0/mPeXU6c3wKDV83MkOuHPRHtSXKKU99IBazS/2w==",
++      "license": "0BSD"
++    },
++    "node_modules/@supabase/supabase-js": {
++      "version": "2.119.2",
++      "resolved": "https://registry.npmjs.org/@supabase/supabase-js/-/supabase-js-2.119.2.tgz",
++      "integrity": "sha512-4HvF4G2DwdqjmwPBpz9RHnXWfdK0wSkw4yBhxe64CdeF8gdxsTF9WZuHFuNWtQnHllq71ZDyAghr4Q8nC0m/NA==",
++      "license": "MIT",
++      "dependencies": {
++        "@supabase/auth-js": "2.119.2",
++        "@supabase/functions-js": "2.119.2",
++        "@supabase/postgrest-js": "2.119.2",
++        "@supabase/realtime-js": "2.119.2",
++        "@supabase/storage-js": "2.119.2"
++      },
++      "engines": {
++        "node": ">=22.0.0"
++      },
++      "peerDependencies": {
++        "@opentelemetry/api": ">=1.0.0"
++      },
++      "peerDependenciesMeta": {
++        "@opentelemetry/api": {
++          "optional": true
++        }
++      }
++    },
+     "node_modules/@swc/helpers": {
+       "version": "0.5.23",
+       "resolved": "https://registry.npmjs.org/@swc/helpers/-/helpers-0.5.23.tgz",
+@@ -1178,6 +1301,15 @@
+         "node": ">=20"
+       }
+     },
++    "node_modules/iceberg-js": {
++      "version": "0.8.1",
++      "resolved": "https://registry.npmjs.org/iceberg-js/-/iceberg-js-0.8.1.tgz",
++      "integrity": "sha512-1dhVQZXhcHje7798IVM+xoo/1ZdVfzOMIc8/rgVSijRK38EDqOJoGula9N/8ZI5RD8QTxNQtK/Gozpr+qUqRRA==",
++      "license": "MIT",
++      "engines": {
++        "node": ">=20.0.0"
++      }
++    },
+     "node_modules/ipaddr.js": {
+       "version": "2.5.0",
+       "resolved": "https://registry.npmjs.org/ipaddr.js/-/ipaddr.js-2.5.0.tgz",
+diff --git a/package.json b/package.json
+index 0d399cb..f6d3b30 100644
+--- a/package.json
++++ b/package.json
+@@ -15,6 +15,7 @@
+     "api:dev": "node --watch src/server.ts"
+   },
+   "dependencies": {
++    "@supabase/supabase-js": "^2.119.2",
+     "fastify": "^5.12.8",
+     "next": "^16.4.6",
+     "react": "^19.3.1",
+diff --git a/supabase/migrations/20261121000100_bookings.sql b/supabase/migrations/20261121000100_bookings.sql
+new file mode 100644
+index 0000000..0d2d855
+--- /dev/null
++++ b/supabase/migrations/20261121000100_bookings.sql
+@@ -0,0 +1,120 @@
++create schema if not exists extensions;
++create extension if not exists postgis with schema extensions;
++
++create table public.ride_landmarks (
++  id text primary key,
++  demo_x integer not null,
++  demo_y integer not null,
++  location extensions.geography(point, 4326) not null
++);
++create index ride_landmarks_location_idx on public.ride_landmarks using gist (location);
++
++insert into public.ride_landmarks (id, demo_x, demo_y, location) values
++  ('port', 70, 23, extensions.st_setsrid(extensions.st_makepoint(-7.6124, 33.5994), 4326)),
++  ('hassan', 22, 30, extensions.st_setsrid(extensions.st_makepoint(-7.6327, 33.6086), 4326)),
++  ('maarif', 49, 72, extensions.st_setsrid(extensions.st_makepoint(-7.6388, 33.5823), 4326)),
++  ('habous', 80, 79, extensions.st_setsrid(extensions.st_makepoint(-7.6067, 33.5768), 4326));
++
++alter table public.ride_landmarks enable row level security;
++revoke all on public.ride_landmarks from public, anon, authenticated;
++
++create table public.passenger_bookings (
++  id uuid primary key default gen_random_uuid(),
++  passenger_id uuid not null references auth.users (id) on delete cascade,
++  request_id uuid not null,
++  pickup_id text not null references public.ride_landmarks (id),
++  dropoff_id text not null references public.ride_landmarks (id),
++  status text not null default 'confirmed' check (status in ('confirmed', 'approaching', 'onboard', 'completed')),
++  estimated_minutes integer not null check (estimated_minutes > 0),
++  base_minor integer not null check (base_minor >= 0),
++  distance_minor integer not null check (distance_minor >= 0),
++  total_minor integer generated always as (base_minor + distance_minor) stored,
++  created_at timestamptz not null default now(),
++  unique (passenger_id, request_id),
++  check (pickup_id <> dropoff_id)
++);
++create index passenger_bookings_history_idx on public.passenger_bookings (passenger_id, created_at desc, id desc);
++
++alter table public.passenger_bookings enable row level security;
++revoke all on public.passenger_bookings from public, anon, authenticated;
++grant select on public.passenger_bookings to authenticated;
++create policy "Passengers read their own bookings"
++  on public.passenger_bookings for select to authenticated
++  using ((select auth.uid()) = passenger_id);
++
++create function public.confirm_demo_booking(p_request_id uuid, p_pickup_id text, p_dropoff_id text)
++returns public.passenger_bookings
++language plpgsql security definer set search_path = ''
++as $$
++declare
++  actor uuid := auth.uid();
++  trip_distance double precision;
++  booking public.passenger_bookings;
++begin
++  if actor is null then
++    raise exception using errcode = '42501', message = 'Sign in required';
++  end if;
++
++  select sqrt(power(p.demo_x - d.demo_x, 2) + power(p.demo_y - d.demo_y, 2))
++    into trip_distance
++    from public.ride_landmarks p, public.ride_landmarks d
++    where p.id = p_pickup_id and d.id = p_dropoff_id and p.id <> d.id;
++  if trip_distance is null or p_request_id is null then
++    raise exception using errcode = '22023', message = 'Invalid demo booking';
++  end if;
++
++  insert into public.passenger_bookings
++    (passenger_id, request_id, pickup_id, dropoff_id, estimated_minutes, base_minor, distance_minor)
++    values (actor, p_request_id, p_pickup_id, p_dropoff_id, ceil(6 + trip_distance / 6)::integer,
++      900, round(trip_distance / 5)::integer * 100)
++    on conflict (passenger_id, request_id) do nothing
++    returning * into booking;
++  if not found then
++    select * into strict booking from public.passenger_bookings
++      where passenger_id = actor and request_id = p_request_id;
++    if booking.pickup_id <> p_pickup_id or booking.dropoff_id <> p_dropoff_id then
++      raise exception using errcode = '22023', message = 'Request already used for a different route';
++    end if;
++  end if;
++  return booking;
++end;
++$$;
++
++create function public.advance_demo_booking(p_booking_id uuid, p_expected_status text)
++returns public.passenger_bookings
++language plpgsql security definer set search_path = ''
++as $$
++declare
++  actor uuid := auth.uid();
++  next_status text := case p_expected_status
++    when 'confirmed' then 'approaching'
++    when 'approaching' then 'onboard'
++    when 'onboard' then 'completed'
++  end;
++  booking public.passenger_bookings;
++begin
++  if actor is null then
++    raise exception using errcode = '42501', message = 'Sign in required';
++  end if;
++  if next_status is null then
++    raise exception using errcode = '22023', message = 'Booking state could not be advanced';
++  end if;
++  update public.passenger_bookings
++    set status = next_status
++    where id = p_booking_id and passenger_id = actor and status = p_expected_status
++    returning * into booking;
++  if not found then
++    select * into booking from public.passenger_bookings
++      where id = p_booking_id and passenger_id = actor and status = next_status;
++    if not found then
++      raise exception using errcode = '22023', message = 'Booking state could not be advanced';
++    end if;
++  end if;
++  return booking;
++end;
++$$;
++
++revoke all on function public.confirm_demo_booking(uuid, text, text) from public, anon, authenticated;
++revoke all on function public.advance_demo_booking(uuid, text) from public, anon, authenticated;
++grant execute on function public.confirm_demo_booking(uuid, text, text) to authenticated;
++grant execute on function public.advance_demo_booking(uuid, text) to authenticated;
+diff --git a/supabase/tests/bookings.sql b/supabase/tests/bookings.sql
+new file mode 100644
+index 0000000..039f066
+--- /dev/null
++++ b/supabase/tests/bookings.sql
+@@ -0,0 +1,79 @@
++\set ON_ERROR_STOP on
++begin;
++
++insert into auth.users (id) values
++  ('10000000-0000-4000-8000-000000000001'),
++  ('10000000-0000-4000-8000-000000000002');
++
++set local role authenticated;
++select set_config('request.jwt.claim.sub', '10000000-0000-4000-8000-000000000001', true);
++
++do $$
++declare
++  booking public.passenger_bookings;
++  retried public.passenger_bookings;
++begin
++  booking := public.confirm_demo_booking('20000000-0000-4000-8000-000000000001', 'port', 'maarif');
++  retried := public.confirm_demo_booking('20000000-0000-4000-8000-000000000001', 'port', 'maarif');
++  if booking.id is distinct from retried.id or booking.total_minor <> 2000
++    or booking.estimated_minutes <> 15 or (select count(*) from public.passenger_bookings) <> 1 then
++    raise exception 'Unexpected fare, estimate or idempotency result';
++  end if;
++  begin
++    perform public.confirm_demo_booking('20000000-0000-4000-8000-000000000001', 'port', 'hassan');
++    raise exception 'Reused request with a different route';
++  exception when invalid_parameter_value then null;
++  end;
++  begin
++    perform public.confirm_demo_booking('20000000-0000-4000-8000-000000000002', 'port', 'port');
++    raise exception 'Accepted identical stops';
++  exception when invalid_parameter_value then null;
++  end;
++  begin
++    update public.passenger_bookings set base_minor = 0;
++    raise exception 'Direct fare mutation allowed';
++  exception when insufficient_privilege then null;
++  end;
++  retried := public.advance_demo_booking(booking.id, 'confirmed');
++  if retried.status <> 'approaching' then raise exception 'Unexpected state'; end if;
++  retried := public.advance_demo_booking(booking.id, 'confirmed');
++  if retried.status <> 'approaching' then raise exception 'Retry advanced twice'; end if;
++  perform set_config('rideflow.test_booking_id', booking.id::text, true);
++end $$;
++
++select set_config('request.jwt.claim.sub', '10000000-0000-4000-8000-000000000002', true);
++do $$
++declare
++  booking public.passenger_bookings;
++begin
++  if exists (select from public.passenger_bookings) then
++    raise exception 'Second passenger could read the first passenger booking';
++  end if;
++  begin
++    perform public.advance_demo_booking(current_setting('rideflow.test_booking_id')::uuid, 'approaching');
++    raise exception 'Second passenger could advance the first passenger booking';
++  exception when invalid_parameter_value then null;
++  end;
++  booking := public.confirm_demo_booking('20000000-0000-4000-8000-000000000001', 'port', 'maarif');
++  if (select count(*) from public.passenger_bookings) <> 1
++    or booking.id = current_setting('rideflow.test_booking_id')::uuid then
++    raise exception 'Idempotency or visibility is not scoped to the passenger';
++  end if;
++end $$;
++
++set local role anon;
++do $$
++begin
++  begin
++    perform public.confirm_demo_booking('20000000-0000-4000-8000-000000000001', 'port', 'maarif');
++    raise exception 'Anonymous booking creation allowed';
++  exception when insufficient_privilege then null;
++  end;
++  begin
++    perform 1 from public.passenger_bookings;
++    raise exception 'Anonymous booking read allowed';
++  exception when insufficient_privilege then null;
++  end;
++end $$;
++
++rollback;
+-- 
+2.56.1
+
