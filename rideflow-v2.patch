@@ -1,0 +1,2428 @@
+diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
+new file mode 100644
+index 0000000..c1bbf02
+--- /dev/null
++++ b/.github/workflows/ci.yml
+@@ -0,0 +1,20 @@
++name: CI
++
++on: [push, pull_request]
++
++permissions:
++  contents: read
++
++jobs:
++  verify:
++    runs-on: ubuntu-latest
++    steps:
++      - uses: actions/checkout@v6
++      - uses: actions/setup-node@v6
++        with:
++          node-version-file: .nvmrc
++          cache: npm
++      - run: npm ci
++      - run: npm run typecheck
++      - run: npm test
++      - run: npm run build
+diff --git a/.gitignore b/.gitignore
+new file mode 100644
+index 0000000..645d732
+--- /dev/null
++++ b/.gitignore
+@@ -0,0 +1,6 @@
++node_modules/
++.env
++
++.next/
++next-env.d.ts
++*.tsbuildinfo
+diff --git a/.nvmrc b/.nvmrc
+new file mode 100644
+index 0000000..a45fd52
+--- /dev/null
++++ b/.nvmrc
+@@ -0,0 +1 @@
++24
+diff --git a/README.md b/README.md
+index 8b13789..7c69509 100644
+--- a/README.md
++++ b/README.md
+@@ -1 +1,27 @@
++# RideFlow
+ 
++RideFlow is a Morocco-first mobility marketplace project. The current milestone is an interactive Casablanca ride demo in English, French and Arabic. Select two landmarks, review an itemized estimate, confirm, and advance through the simulated trip.
++
++- [Architecture and implementation roadmap](docs/architecture-v2.md)
++- [Database design and migration plan](docs/database-plan.md)
++
++## Run locally
++
++Use Node.js 24.
++
++```sh
++npm ci
++npm run dev
++```
++
++Open http://localhost:3000. The demo operates entirely in the browser. It uses fixed landmarks, schematic routes and synthetic prices. A reload clears the ride. The app includes a PWA manifest and icons. Offline operation is pending.
++
++The earlier Fastify health API is available separately via `PORT=3001 npm run api:dev`. The demo UI has no dependency on that server.
++
++## Verify
++
++```sh
++npm run typecheck
++npm test
++npm run build
++```
+diff --git a/app/layout.tsx b/app/layout.tsx
+new file mode 100644
+index 0000000..56c0cdc
+--- /dev/null
++++ b/app/layout.tsx
+@@ -0,0 +1,13 @@
++import type { Metadata } from 'next';
++import type { ReactNode } from 'react';
++import './style.css';
++
++export const metadata: Metadata = {
++  title: 'RideFlow',
++  description: 'Plan a demo ride in Casablanca.',
++  manifest: '/manifest.webmanifest',
++};
++
++export default function RootLayout({ children }: { children: ReactNode }) {
++  return <html lang="en"><body>{children}</body></html>;
++}
+diff --git a/app/manifest.ts b/app/manifest.ts
+new file mode 100644
+index 0000000..6cb17d0
+--- /dev/null
++++ b/app/manifest.ts
+@@ -0,0 +1,17 @@
++import type { MetadataRoute } from 'next';
++
++export default function manifest(): MetadataRoute.Manifest {
++  return {
++    name: 'RideFlow',
++    short_name: 'RideFlow',
++    description: 'A Casablanca mobility marketplace demo.',
++    start_url: '/',
++    display: 'standalone',
++    background_color: '#f4f5ef',
++    theme_color: '#172b25',
++    icons: [
++      { src: '/icon-192.png', sizes: '192x192', type: 'image/png' },
++      { src: '/icon-512.png', sizes: '512x512', type: 'image/png' },
++    ],
++  };
++}
+diff --git a/app/page.tsx b/app/page.tsx
+new file mode 100644
+index 0000000..4437f9a
+--- /dev/null
++++ b/app/page.tsx
+@@ -0,0 +1,129 @@
++'use client';
++
++import { useEffect, useState } from 'react';
++import { nextStatus, places, quoteRide, steps } from '../lib/demo';
++import type { Quote, Status } from '../lib/demo';
++
++const translations = [
++  {
++    lang: 'en', dir: 'ltr', demo: 'Casablanca demo', title: 'Book a ride',
++    pickup: 'Pickup', dropoff: 'Drop-off', review: 'Get estimate', confirm: 'Confirm demo ride',
++    duration: 'Estimated time', minutes: 'min', base: 'Base fare', distance: 'Distance charge', total: 'Demo total',
++    valid: 'Choose two different stops.', map: 'Casablanca route schematic',
++    statuses: ['Booking confirmed', 'Vehicle approaching', 'On board', 'Ride complete'],
++    progress: 'Advance simulation', restart: 'Book another ride', taxi: 'Taxi First',
++    note: 'Simulated route and fare. No vehicle is dispatched or payment collected.',
++  },
++  {
++    lang: 'fr', dir: 'ltr', demo: 'Démo Casablanca', title: 'Réserver un trajet',
++    pickup: 'Départ', dropoff: 'Arrivée', review: 'Voir le tarif estimé', confirm: 'Confirmer le trajet démo',
++    duration: 'Durée estimée', minutes: 'min', base: 'Prix de base', distance: 'Prix de la distance', total: 'Total démo',
++    valid: 'Choisissez deux arrêts différents.', map: 'Schéma du trajet à Casablanca',
++    statuses: ['Réservation confirmée', 'Véhicule en approche', 'À bord', 'Trajet terminé'],
++    progress: 'Avancer la simulation', restart: 'Réserver un autre trajet', taxi: 'Priorité aux taxis',
++    note: 'Trajet et tarif simulés. Aucun véhicule envoyé et aucun paiement encaissé.',
++  },
++  {
++    lang: 'ar', dir: 'rtl', demo: 'عرض تجريبي بالدار البيضاء', title: 'احجز رحلة',
++    pickup: 'الانطلاق', dropoff: 'الوجهة', review: 'عرض السعر التقديري', confirm: 'تأكيد الرحلة التجريبية',
++    duration: 'المدة التقديرية', minutes: 'دقيقة', base: 'السعر الأساسي', distance: 'تكلفة المسافة', total: 'المجموع التجريبي',
++    valid: 'اختر محطتين مختلفتين.', map: 'مخطط الرحلة في الدار البيضاء',
++    statuses: ['تم تأكيد الحجز', 'المركبة تقترب', 'الراكب على متن المركبة', 'انتهت الرحلة'],
++    progress: 'متابعة المحاكاة', restart: 'احجز رحلة أخرى', taxi: 'الأولوية لسيارات الأجرة',
++    note: 'المسار والسعر للمحاكاة. لن يتم إرسال مركبة أو تحصيل أي مبلغ.',
++  },
++] as const;
++
++export default function Home() {
++  const [locale, setLocale] = useState(0);
++  const [pickup, setPickup] = useState<string>('port');
++  const [dropoff, setDropoff] = useState<string>('maarif');
++  const [quote, setQuote] = useState<Quote | null>(null);
++  const [status, setStatus] = useState<Status | null>(null);
++  const [invalid, setInvalid] = useState(false);
++  const t = translations[locale];
++
++  useEffect(() => {
++    document.documentElement.lang = t.lang;
++    document.documentElement.dir = t.dir;
++  }, [t.lang, t.dir]);
++
++  const start = places.find((place) => place.id === pickup)!;
++  const end = places.find((place) => place.id === dropoff)!;
++  const dx = end.x - start.x;
++  const dy = (end.y - start.y) * 0.72;
++  const money = (minor: number) =>
++    new Intl.NumberFormat(t.lang, { style: 'currency', currency: 'MAD' }).format(minor / 100);
++
++  function selectPoint(setPoint: (id: string) => void, id: string) {
++    setPoint(id);
++    setQuote(null);
++    setInvalid(false);
++  }
++
++  return (
++    <main>
++      <header>
++        <strong className="brand">RideFlow<span>.</span></strong>
++        <label className="locale">
++          <span className="sr-only">Language / Langue / اللغة</span>
++          <select value={locale} onChange={(event) => setLocale(Number(event.target.value))}>
++            <option value={0}>English</option><option value={1}>Français</option><option value={2}>العربية</option>
++          </select>
++        </label>
++      </header>
++      <div className="workspace">
++        <section className="panel">
++          <p className="context">{t.demo}</p>
++          <h1>{t.title}</h1>
++          <p className="note">{t.note}</p>
++          {!status && <form onSubmit={(event) => {
++            event.preventDefault();
++            const estimate = quoteRide(pickup, dropoff);
++            setQuote(estimate);
++            setInvalid(estimate === null);
++          }}>
++            <label>{t.pickup}<select value={pickup} onChange={(event) => selectPoint(setPickup, event.target.value)}>
++              {places.map((place) => <option key={place.id} value={place.id}>{place.names[locale]}</option>)}
++            </select></label>
++            <label>{t.dropoff}<select value={dropoff} onChange={(event) => selectPoint(setDropoff, event.target.value)}>
++              {places.map((place) => <option key={place.id} value={place.id}>{place.names[locale]}</option>)}
++            </select></label>
++            {invalid && <p role="alert" className="error">{t.valid}</p>}
++            {!quote && <button>{t.review}</button>}
++          </form>}
++          {quote && !status && <div className="details">
++            <dl>
++              <div><dt>{t.duration}</dt><dd>{quote.minutes} {t.minutes}</dd></div>
++              <div><dt>{t.base}</dt><dd>{money(quote.baseMinor)}</dd></div>
++              <div><dt>{t.distance}</dt><dd>{money(quote.distanceMinor)}</dd></div>
++              <div className="total"><dt>{t.total}</dt><dd>{money(quote.totalMinor)}</dd></div>
++            </dl>
++            <button onClick={() => setStatus('confirmed')}>{t.confirm}</button>
++          </div>}
++          {status && <div className="details">
++            <p aria-live="polite" className="current">{t.statuses[steps.indexOf(status)]}</p>
++            <ol>{steps.map((step, index) => <li key={step} aria-current={step === status ? 'step' : undefined}>{t.statuses[index]}</li>)}</ol>
++            {status === 'completed'
++              ? <button onClick={() => { setStatus(null); setQuote(null); }}>{t.restart}</button>
++              : <button onClick={() => setStatus(nextStatus(status))}>{t.progress}</button>}
++          </div>}
++        </section>
++        <figure className="map">
++          <figcaption>{t.map}</figcaption>
++          <div className="chart" dir="ltr">
++            <div className="shore" />
++            <div className="route" style={{
++              left: start.x + '%', top: start.y + '%',
++              width: Math.hypot(dx, dy) + '%', transform: 'rotate(' + Math.atan2(dy, dx) + 'rad)',
++            }} />
++            {places.map((place) => <span key={place.id} style={{ left: place.x + '%', top: place.y + '%' }}
++              className={'point' + (place === start || place === end ? ' selected' : '')}>
++              <span className="dot" /><span className="place">{place.names[locale]}</span>
++            </span>)}
++          </div>
++        </figure>
++      </div>
++    </main>
++  );
++}
+diff --git a/app/style.css b/app/style.css
+new file mode 100644
+index 0000000..1ac385e
+--- /dev/null
++++ b/app/style.css
+@@ -0,0 +1,38 @@
++:root{color-scheme:light;background:#f4f5ef;color:#172b25;font-family:system-ui,sans-serif}
++*{box-sizing:border-box}
++body{margin:0}
++main{max-width:1280px;margin:auto;padding:24px clamp(16px,4vw,56px) 48px}
++header{display:flex;align-items:center;justify-content:space-between;margin-bottom:28px}
++.brand{font-size:2rem;letter-spacing:-.07em}
++.brand span{color:#33785e}
++button,select{font:inherit}
++select{width:100%;padding:12px;color:inherit;border:1px solid #b9c7bf;border-radius:8px;background:white}
++.workspace{display:grid;grid-template-columns:minmax(280px,370px) minmax(0,1fr);align-items:start;gap:18px}
++.panel,.map{border:1px solid #d6dfd5;border-radius:20px;background:white;overflow:hidden}
++.panel{padding:24px}
++.context{margin:0;color:#34604f;font-size:.88rem;font-weight:650}
++h1{font-size:clamp(2rem,4vw,3rem);margin:5px 0 10px;line-height:1.05}
++.note{margin:0 0 22px;color:#455b51;font-size:.9rem}
++form{display:grid;gap:14px}
++form label{display:grid;gap:6px;font-weight:650}
++button{width:100%;padding:13px 12px;background:#174735;color:white;border:0;border-radius:8px;font-weight:700;cursor:pointer}
++button:hover{background:#225c45}
++:focus-visible{outline:3px solid #33785e;outline-offset:3px}
++.details{margin-top:16px}
++dl div{display:flex;justify-content:space-between;gap:10px;padding:7px 0}
++dd{margin:0}
++.total{border-top:1px solid #d6dfd5;font-weight:700}
++.current,[aria-current=step]{font-weight:750;color:#174735}
++ol{padding-inline-start:22px}
++.error{color:#a52626;margin:0}
++.map{margin:0;background:#e7eee0}
++figcaption{padding:15px 19px;font-weight:650;background:#fff}
++.chart{position:relative;isolation:isolate;aspect-ratio:1/.72;overflow:hidden;background:repeating-linear-gradient(28deg,transparent 0 28px,#fff9 29px 33px),repeating-linear-gradient(120deg,transparent 0 35px,#fff9 36px 40px),#e3e9d9}
++.shore{position:absolute;inset:0 0 auto;height:53%;background:#b9dad9;clip-path:polygon(0 0,100% 0,100% 31%,77% 43%,55% 24%,28% 39%,0 74%)}
++.route{position:absolute;height:5px;transform-origin:0 0;background:#267256;border-radius:4px}
++.point{position:absolute;display:grid;justify-items:center;gap:4px;transform:translate(-50%,-7px)}
++.dot{background:#577064;border:2px solid white;width:14px;height:14px;border-radius:50%}
++.selected .dot{background:#194a39}
++.place{color:#172b25;background:#fffffff2;padding:2px 5px;border-radius:4px;font-size:clamp(.65rem,1.4vw,.82rem);text-align:center}
++.sr-only{position:absolute;width:1px;height:1px;overflow:hidden;clip-path:inset(50%)}
++@media(max-width:730px){.workspace{grid-template-columns:1fr}.map{grid-row:1}.panel{padding:20px}header{margin-bottom:16px}}
+diff --git a/docs/architecture-v2.md b/docs/architecture-v2.md
+new file mode 100644
+index 0000000..4fc0c30
+--- /dev/null
++++ b/docs/architecture-v2.md
+@@ -0,0 +1,54 @@
++# RideFlow architecture v2
++
++## Product and pilot boundaries
++
++RideFlow is a Morocco-first mobility marketplace for passengers and verified transport operators. Licensed taxis are the primary partners. Petit taxi, grand taxi and other operator classes are catalog entries whose actual permissions come from verified, versioned rules for the applicable jurisdiction and service zone. An unknown, expired, conflicting or unverifiable rule fails closed. Taxi-first scoring runs only after the eligibility gate. Local counsel and the relevant partners must verify boundaries, fare models, pooling, waiting, payments and platform operating permissions before a pilot.
++
++The mobile-first web experience starts with Book a Ride and Taxi First, then introduces Find a Comrade, Multi-Stop Journey, Schedule a Ride and My Regular Driver when their eligibility checks and workflows are implemented. Passenger and driver interfaces use English, French and Arabic with RTL layout, locale-aware display and confirmation in the local service time zone. Maintain a keyboard-accessible booking path alongside maps. A manifest enables installability work and a service worker should cache only public assets, never private locations, quotes or trips.
++
++## Components and access
++
++- Next.js and TypeScript serve the passenger and operator interfaces and server-side APIs. Supabase Auth supplies user identities. Database membership and assignments determine privileges. Users cannot set their own operator verification or staff rights.
++- Supabase PostgreSQL with PostGIS holds authoritative data. Public API mutations validate identity and inputs and call narrow transactional commands. A background worker reads committed outbox events for dispatch and notifications. Use idempotent workers with bounded retries and dead-letter review.
++- Mapbox geocoding, directions and matrix requests use a provider adapter and server-held credentials where needed. The browser map uses a separate restricted public token. Send the minimum coordinates necessary and account for provider retention rules. Do not put private coordinates in analytics, exception logs or shared realtime payloads.
++- Supabase Realtime distributes booking-scoped status and assigned-driver tracking, authorized per booking. Passengers see only their own precise pickup and destination. For pooled trips give passengers their pickup coordination, vehicle ETA and coarse trip progress. The assigned driver sees instructions only for active assignments and the relevant time window. Audit staff access to precise locations.
++- A payment provider integration uses idempotency keys and signed, replay-protected webhooks. Ledger postings are immutable, balanced and denominated in integer minor units. Refunds and adjustments are compensating postings. Keep subscription billing distinct from passenger ride settlement.
++
++## Lifecycle and commands
++
++| Aggregate | Main transitions |
++| --- | --- |
++| Passenger booking | requested → confirmed → awaiting_pickup → onboard → completed. Eligible earlier states permit cancelled or no_show. |
++| Vehicle journey | planned → assigned → en_route → in_progress → completed. Pre-start cancellation releases assignments and seats. |
++| Dispatch offer | pending → accepted, declined, expired or withdrawn. |
++| Subscription | proposed → accepted → active → ended. Supported transitions include paused, cancelled and expired. |
++
++Use named commands with actor, expected state/version, timestamps, reason and idempotency key. Persist state changes and outbox events in the same transaction. Offer acceptance checks expiry against database time and locks the offer and journey before writing assignment and withdrawing competing offers. A retry replays the original outcome. Passenger booking, driver assignment, journey and settlement have separate identifiers and events.
++
++## Domain modules
++
++- **Taxi dispatch** first filters current licenses and vehicle types, authorized origin/destination and any corridor or operating-time constraints, capacity, and driver availability. Use geofence and proximity queries to shortlist, then a routing matrix for ETA. Rank by policy-defined taxi preference, ETA and transparent tie-break rules. No qualified vehicle yields an unavailable result.
++- **Fares** produce expiring, immutable quotes with rule version, route estimate, currency and itemized basis. Store acceptance. Metered services distinguish estimates from regulated settlement. Compose revisions as new quotes, require approval before material amendments, and account for waiting charges only where an active rule permits them.
++- **Multi-stop** keeps ordered stops with optional requested waiting duration. Route in the specified order and requote after edits. Record server-timed arrival, start, pause if supported and end events with enforced waiting limits. Quote approval is required before applying newly chargeable changes.
++- **Scheduling** stores pickup windows and reservation buffers including repositioning travel, using UTC instants plus the service IANA zone (initially Africa/Casablanca). Resolve ambiguous wall times explicitly and reject nonexistent times. Apply lead times, cancellation deadlines, driver calendars and notifications. Recheck feasibility when itinerary or schedule changes.
++- **Subscriptions** store accepted terms including preferred driver, weekdays, local times, directions including returns, dates and price. Generate occurrences on a rolling horizon using unique series/date/direction keys. Model vacation, skips and unavailable drivers as occurrence dispositions. Replacement is a proposal requiring applicable approvals. Avoid presenting confirmed service before coverage is established.
++- **Pooling** shortlists opted-in bookings by zone, spatial overlap and compatible time windows. Use the route matrix to test pickup-before-drop-off insertions, then evaluate ETA shifts, detour and seat occupancy on every segment. Create an expiring match and quote for each participant. Confirm only with all required consent, current quotes, authorization and capacity in one transaction. Provide separate cancellations, no-show rules and allocations per passenger. Evaluate simulator outcomes before enabling real dispatch.
++
++## Delivery roadmap
++
++| Phase | Exit criteria |
++| --- | --- |
++| A. Specification | Architecture, controls, user flows and readiness classifications agreed. |
++| B. Database design | Schema and migration plan reviewed. Confirm keys, role boundaries and transaction invariants in a disposable Supabase database before production rollout. |
++| C. Single passenger | Select pickup and drop-off, review an upfront demo quote, confirm, and track a simulated journey in responsive Next.js. Integrate real routing, authentication and durable bookings before live use. |
++| D. Taxi-first | Review operator evidence, publish versioned rules, exercise disqualification and test ranked dispatch. |
++| E. Multi-stop | Validate ordering, estimates, waiting limits and quote revisions. |
++| F. Scheduling | Verify local-time edge cases, repositioning and concurrent conflict rejection. |
++| G. Recurrence | Verify acceptance, idempotent occurrence creation, exceptions and separate billing. |
++| H. Pooling | Test insertion, consent, no-shows and concurrent per-segment seat allocation in simulation. |
++| I. Hardening | Run RLS isolation, race, lifecycle, localization, accessibility and mobile end-to-end suites. |
++| J. Controlled pilot | Verify legal and partner authorization, payment operations, incident response, insurance and location privacy terms. Explicit approval gates any live dispatch. |
++
++## Delivery status
++
++The first milestone implements a demo quote, confirmation and tracking flow for one passenger. Routes, fares and the vehicle lifecycle are simulated. The live Supabase, Mapbox, verified taxi, real-time operator, payment and identity integrations are incomplete. Multi-stop, scheduled, recurring and shared journeys are specified here for later milestones. Live dispatch and charging remain blocked pending verified rules, appropriate agreements, privacy review and operational testing.
+diff --git a/docs/database-plan.md b/docs/database-plan.md
+new file mode 100644
+index 0000000..36467e5
+--- /dev/null
++++ b/docs/database-plan.md
+@@ -0,0 +1,42 @@
++# PostgreSQL and PostGIS migration plan
++
++Use UUID business identifiers, UTC timestamp columns and foreign keys on all relationships. Store money in integer minor units with currency. Use WGS84 point geography for distance queries and SRID 4326 geometry for jurisdiction polygons and route lines. Add GiST indexes for spatial predicates and B-tree indexes on foreign keys, state/time lookup and idempotency keys. Use ST_DWithin for proximity and ST_Covers for service-zone boundaries. Apply route or corridor restrictions separately when required.
++
++## Relations and constraints
++
++| Relation | Purpose and key constraints |
++| --- | --- |
++| profiles, operators, operator_members, vehicles | Link identities and operator membership. Vehicle ownership and positive seat capacity are explicit. |
++| operator_licenses | Evidence record tied to operator and optionally vehicle, with type, review status, validity and verifier. Private evidence storage with restricted access. |
++| taxi_service_rules | Versioned jurisdiction, service zone, applicability, category, permissions and fare/waiting rule. Unique jurisdiction/rule/version and auditable activation. |
++| journeys, bookings | Physical vehicle run separately from passenger reservation. Bookings reference their passenger and optionally their confirmed journey. |
++| ride_itineraries, ride_stops | Immutable itinerary revisions with unique journey/revision and unique itinerary/stop position. Stops carry location, action and requested wait. |
++| pool_requests, pool_matches | Booking-scoped consent, pickup window and detour tolerance. Expiring proposed journey revision with scoped match membership and consent timestamps. |
++| ride_participants | Unique journey/booking allocation with pickup and drop-off indexes on the same revision and positive seats. Pickup index must precede drop-off. |
++| fare_quotes | Immutable versions per booking covering pricing rule, route revision, itemized amounts, expiration and acceptance evidence. |
++| waiting_sessions | Stop-specific actual timing and policy cap. Partial unique index permits one open session per stop. |
++| driver_availability | Time ranges tagged as availability or block. Store driver time zone and local scheduling policy separately from reserved instants. |
++| scheduled_bookings | Booking-specific pickup window, lead time, cancellation deadline and confirmation state. |
++| driver_reservations | Active occupied time including buffers. Exclude overlaps with GiST on driver UUID equality and tstzrange overlap using btree_gist. |
++| recurrence_rules, driver_subscriptions | Versioned weekdays, local times, destinations, return terms, bounded dates and time zone. Agreement records both actors and driver acceptance. |
++| subscription_occurrences | Unique subscription/local date/direction with optional booking and explicit skip or replacement disposition. |
++| billing_ledger | Balanced postings by ledger transaction with currency, unique external event and unique command reference per settlement purpose. |
++| dispatch_offers, state_events, outbox | Offers expire by database time. State events capture actor and transition. Outbox stores deduplication keys and delivery attempts. |
++
++## Transaction and authorization design
++
++- Allocate seats in a transaction that locks the journey, verifies the active itinerary revision, current quotes and pooling consent, and checks occupancy over each half-open segment from pickup through drop-off. Insert all participant reservations atomically. Cancellations and itinerary revisions take the same lock. Recompute occupancy before committing a reorder.
++- Accept dispatch offers with a conditional transition from pending and an unexpired deadline. Lock the journey, verify current authorization and calendar rules, insert the exclusion-protected driver reservation and update journey assignment in one transaction. Repositioning requirements must fit alongside prior and next trips.
++- Enforce unique actor/operation/key for commands and unique provider/event IDs for webhook receipts. Couple transactional writes with outbox insertion. Keep payment network calls outside database transactions and retry them with stable processor keys.
++- Enable RLS on every exposed table and explicitly grant only necessary operations. Passengers can read their own bookings, quotes and constrained status events. Assigned drivers receive scoped pickup details. Operator members see records for their authorized organization. Internal rules, licence evidence, raw location history and ledger operations have narrow grants. Revoke default function execution for privileged RPCs, fix search paths, schema-qualify relations and derive actor identity from validated auth. Keep service-role keys server-side and use private Realtime channels.
++
++## Migration sequence and verification
++
++1. Enable postgis and btree_gist. Create private schemas, role grants, profiles, organizations, vehicles, licensing and policy tables. Seed only explicitly marked synthetic policies.
++2. Add bookings, journeys, itinerary versions, quotes and state transitions. Apply RLS and verify cross-account read/write isolation before connecting clients.
++3. Add offers, reservations, availability and outbox. Concurrently test offer expiry, duplicate commands and overlapping reservations with real independent PostgreSQL sessions.
++4. Add stops, waiting, schedule and recurring agreements. Exercise ambiguous times, accepted quote revisions and uniqueness across concurrent occurrence generation.
++5. Add pooling and ledger tables. Race allocations on overlapping and disjoint segments. Test consent revocation, unauthorized fare augmentation and idempotent payment posting.
++6. Promote migrations from an empty test DB and from a representative previous revision. Back up before promotion, check index locks and RLS, and use additive compatibility changes followed by backfill and validation. Keep destructive cleanup in a separately reviewed release.
++
++This is a migration design. The demo milestone does not create or migrate a Supabase database.
+diff --git a/lib/demo.ts b/lib/demo.ts
+new file mode 100644
+index 0000000..e05c771
+--- /dev/null
++++ b/lib/demo.ts
+@@ -0,0 +1,33 @@
++export const places = [
++  { id: 'port', names: ['Casa Port', 'Casa Port', 'كازا بور'], x: 70, y: 23 },
++  { id: 'hassan', names: ['Hassan II Mosque', 'Mosquée Hassan-II', 'مسجد الحسن الثاني'], x: 22, y: 30 },
++  { id: 'maarif', names: ['Maârif', 'Maârif', 'المعاريف'], x: 49, y: 72 },
++  { id: 'habous', names: ['Habous', 'Habous', 'الأحباس'], x: 80, y: 79 },
++] as const;
++
++export type Place = typeof places[number];
++export type Quote = { pickup: Place; dropoff: Place; minutes: number; baseMinor: number; distanceMinor: number; totalMinor: number };
++export const steps = ['confirmed', 'approaching', 'onboard', 'completed'] as const;
++export type Status = typeof steps[number];
++
++export function quoteRide(pickupId: string, dropoffId: string): Quote | null {
++  const pickup = places.find(({ id }) => id === pickupId);
++  const dropoff = places.find(({ id }) => id === dropoffId);
++  if (!pickup || !dropoff || pickup === dropoff) return null;
++
++  const distance = Math.hypot(pickup.x - dropoff.x, pickup.y - dropoff.y);
++  const baseMinor = 900;
++  const distanceMinor = Math.round(distance / 5) * 100;
++  return {
++    pickup,
++    dropoff,
++    minutes: Math.ceil(6 + distance / 6),
++    baseMinor,
++    distanceMinor,
++    totalMinor: baseMinor + distanceMinor,
++  };
++}
++
++export function nextStatus(status: Status): Status {
++  return steps[steps.indexOf(status) + 1] ?? status;
++}
+diff --git a/package-lock.json b/package-lock.json
+new file mode 100644
+index 0000000..954e6fe
+--- /dev/null
++++ b/package-lock.json
+@@ -0,0 +1,1691 @@
++{
++  "name": "rides-service",
++  "version": "0.1.0",
++  "lockfileVersion": 3,
++  "requires": true,
++  "packages": {
++    "": {
++      "name": "rides-service",
++      "version": "0.1.0",
++      "dependencies": {
++        "fastify": "^5.12.8",
++        "next": "^16.4.6",
++        "react": "^19.3.1",
++        "react-dom": "^19.3.1"
++      },
++      "devDependencies": {
++        "@types/node": "^24.19.2",
++        "@types/react": "^19.3.0",
++        "@types/react-dom": "^19.3.0",
++        "typescript": "5.9"
++      },
++      "engines": {
++        "node": "24.x"
++      }
++    },
++    "node_modules/@emnapi/runtime": {
++      "version": "1.11.3",
++      "resolved": "https://registry.npmjs.org/@emnapi/runtime/-/runtime-1.11.3.tgz",
++      "integrity": "sha512-Xz4Tpyki7XyrpbUK1jR1AhdAdaXyhhY4lZ3neLodmhpuWfy2PAQN5B46sAiU4liOXGLkHypn/qU+jvfWSCYYLA==",
++      "license": "MIT",
++      "optional": true,
++      "dependencies": {
++        "tslib": "^2.4.0"
++      }
++    },
++    "node_modules/@fastify/ajv-compiler": {
++      "version": "4.0.8",
++      "resolved": "https://registry.npmjs.org/@fastify/ajv-compiler/-/ajv-compiler-4.0.8.tgz",
++      "integrity": "sha512-xYcAFYoyP/NELMgj6I7LmMAmiqeXMal0wsM2SgueN9OyMr6bVKHomO9OxuStC7bIAEl4Z3JXBbDPwpXRp59NPQ==",
++      "funding": [
++        {
++          "type": "github",
++          "url": "https://github.com/sponsors/fastify"
++        },
++        {
++          "type": "opencollective",
++          "url": "https://opencollective.com/fastify"
++        }
++      ],
++      "license": "MIT",
++      "dependencies": {
++        "ajv": "^8.12.0",
++        "ajv-formats": "^3.0.1",
++        "fast-uri": "^4.0.0"
++      }
++    },
++    "node_modules/@fastify/deepmerge": {
++      "version": "3.2.4",
++      "resolved": "https://registry.npmjs.org/@fastify/deepmerge/-/deepmerge-3.2.4.tgz",
++      "integrity": "sha512-kc8GQq5gX9RRhw0rov3DMrN8wS8yRlxJRdDzsYwwdBV/wazuVgc/1K7CKL90tlvu3RlHan6Y0R0aE3nJtBz2eQ==",
++      "funding": [
++        {
++          "type": "github",
++          "url": "https://github.com/sponsors/fastify"
++        },
++        {
++          "type": "opencollective",
++          "url": "https://opencollective.com/fastify"
++        }
++      ],
++      "license": "MIT"
++    },
++    "node_modules/@fastify/error": {
++      "version": "4.3.0",
++      "resolved": "https://registry.npmjs.org/@fastify/error/-/error-4.3.0.tgz",
++      "integrity": "sha512-mtIdc4R7HnUMOuUDQgnJkEF+Omr2p3JrSSJ44+RME/eAQ5TqdDy5MvXAjze/RyVHhJckuJKkXnMhKfPmFMKqyA==",
++      "funding": [
++        {
++          "type": "github",
++          "url": "https://github.com/sponsors/fastify"
++        },
++        {
++          "type": "opencollective",
++          "url": "https://opencollective.com/fastify"
++        }
++      ],
++      "license": "MIT"
++    },
++    "node_modules/@fastify/fast-json-stringify-compiler": {
++      "version": "5.2.0",
++      "resolved": "https://registry.npmjs.org/@fastify/fast-json-stringify-compiler/-/fast-json-stringify-compiler-5.2.0.tgz",
++      "integrity": "sha512-LPTVA0w4oPITWHAvox9NgI1rDSrjUnjxX6QN5MCb9FY+HqvDsUmgLucbj9eQakqC8lYwO7UgkDPHEQLJNl9vtg==",
++      "funding": [
++        {
++          "type": "github",
++          "url": "https://github.com/sponsors/fastify"
++        },
++        {
++          "type": "opencollective",
++          "url": "https://opencollective.com/fastify"
++        }
++      ],
++      "license": "MIT",
++      "dependencies": {
++        "fast-json-stringify": "^7.3.0"
++      }
++    },
++    "node_modules/@fastify/forwarded": {
++      "version": "3.1.2",
++      "resolved": "https://registry.npmjs.org/@fastify/forwarded/-/forwarded-3.1.2.tgz",
++      "integrity": "sha512-89WiRG+hW3VQSfCwg4Hb8b43PeyEX15K5+lEfsZ4EUth/FyOjS/lv8HsVuswUNXWiSnxMGNouE/fq/0w3VumHQ==",
++      "funding": [
++        {
++          "type": "github",
++          "url": "https://github.com/sponsors/fastify"
++        },
++        {
++          "type": "opencollective",
++          "url": "https://opencollective.com/fastify"
++        }
++      ],
++      "license": "MIT"
++    },
++    "node_modules/@fastify/merge-json-schemas": {
++      "version": "0.2.2",
++      "resolved": "https://registry.npmjs.org/@fastify/merge-json-schemas/-/merge-json-schemas-0.2.2.tgz",
++      "integrity": "sha512-d/gx9sRbUCVgGRGzma46wLcwiY8noTqO2Nmjg/vbTARxHRE5bdh5PIL8s97Lt1X7ScRWRW52eVYxwIoPwIdVUA==",
++      "funding": [
++        {
++          "type": "github",
++          "url": "https://github.com/sponsors/fastify"
++        },
++        {
++          "type": "opencollective",
++          "url": "https://opencollective.com/fastify"
++        }
++      ],
++      "license": "MIT",
++      "dependencies": {
++        "dequal": "^2.0.3"
++      }
++    },
++    "node_modules/@fastify/proxy-addr": {
++      "version": "5.1.3",
++      "resolved": "https://registry.npmjs.org/@fastify/proxy-addr/-/proxy-addr-5.1.3.tgz",
++      "integrity": "sha512-ptgIgB+abBNTs5lsKNvFaKMCauPaTOE6ZIjxJr3FxCLehmYQQKYGg4srwwNICR9QQlFrYw59jWAo+i9GalVCaw==",
++      "funding": [
++        {
++          "type": "github",
++          "url": "https://github.com/sponsors/fastify"
++        },
++        {
++          "type": "opencollective",
++          "url": "https://opencollective.com/fastify"
++        }
++      ],
++      "license": "MIT",
++      "dependencies": {
++        "@fastify/forwarded": "^3.0.0",
++        "ipaddr.js": "^2.1.0"
++      }
++    },
++    "node_modules/@img/colour": {
++      "version": "1.1.0",
++      "resolved": "https://registry.npmjs.org/@img/colour/-/colour-1.1.0.tgz",
++      "integrity": "sha512-Td76q7j57o/tLVdgS746cYARfSyxk8iEfRxewL9h4OMzYhbW4TAcppl0mT4eyqXddh6L/jwoM75mo7ixa/pCeQ==",
++      "license": "MIT",
++      "optional": true,
++      "engines": {
++        "node": ">=18"
++      }
++    },
++    "node_modules/@img/sharp-darwin-arm64": {
++      "version": "0.35.5",
++      "resolved": "https://registry.npmjs.org/@img/sharp-darwin-arm64/-/sharp-darwin-arm64-0.35.5.tgz",
++      "integrity": "sha512-QRUlFQ0WxvdWyqqG/WtI3iupfD5rBzmCHXSdPsY91sAtVtTo7Q4cb6zOccZ3gqEqkr0f1As1ehLqmEpDsRf+lg==",
++      "cpu": [
++        "arm64"
++      ],
++      "license": "Apache-2.0",
++      "optional": true,
++      "os": [
++        "darwin"
++      ],
++      "engines": {
++        "node": ">=20.9.0"
++      },
++      "funding": {
++        "url": "https://opencollective.com/libvips"
++      },
++      "optionalDependencies": {
++        "@img/sharp-libvips-darwin-arm64": "1.3.4"
++      }
++    },
++    "node_modules/@img/sharp-darwin-x64": {
++      "version": "0.35.5",
++      "resolved": "https://registry.npmjs.org/@img/sharp-darwin-x64/-/sharp-darwin-x64-0.35.5.tgz",
++      "integrity": "sha512-+BR255RhDlpygUpOc/Jdt1nT6DQ3XG/ERo5wbcdOf5Q320dKtPCKPLR1LJs9VGXRaMa8l1uUa0tkCNOXiAxZUw==",
++      "cpu": [
++        "x64"
++      ],
++      "license": "Apache-2.0",
++      "optional": true,
++      "os": [
++        "darwin"
++      ],
++      "engines": {
++        "node": ">=20.9.0"
++      },
++      "funding": {
++        "url": "https://opencollective.com/libvips"
++      },
++      "optionalDependencies": {
++        "@img/sharp-libvips-darwin-x64": "1.3.4"
++      }
++    },
++    "node_modules/@img/sharp-freebsd-wasm32": {
++      "version": "0.35.5",
++      "resolved": "https://registry.npmjs.org/@img/sharp-freebsd-wasm32/-/sharp-freebsd-wasm32-0.35.5.tgz",
++      "integrity": "sha512-Y/z91nEZ4uIBX5X3nfTovjU9lHNKFYbL2lpHCLVNmXQK03VIZvXBBt0KxbPGp2SdGSF+2mQU4e+hQaWOt86iAw==",
++      "license": "Apache-2.0",
++      "optional": true,
++      "os": [
++        "freebsd"
++      ],
++      "dependencies": {
++        "@img/sharp-wasm32": "0.35.5"
++      },
++      "engines": {
++        "node": ">=20.9.0"
++      },
++      "funding": {
++        "url": "https://opencollective.com/libvips"
++      }
++    },
++    "node_modules/@img/sharp-libvips-darwin-arm64": {
++      "version": "1.3.4",
++      "resolved": "https://registry.npmjs.org/@img/sharp-libvips-darwin-arm64/-/sharp-libvips-darwin-arm64-1.3.4.tgz",
++      "integrity": "sha512-5R89nBYiRdUlSWJxPhO+GVtaXzXSxKnRu/xqMn3KTA3L9EB9Oy/P+Nn2f2vlhPuUdy/Zusb2DarbyTpGCfEDuw==",
++      "cpu": [
++        "arm64"
++      ],
++      "license": "LGPL-3.0-or-later",
++      "optional": true,
++      "os": [
++        "darwin"
++      ],
++      "funding": {
++        "url": "https://opencollective.com/libvips"
++      }
++    },
++    "node_modules/@img/sharp-libvips-darwin-x64": {
++      "version": "1.3.4",
++      "resolved": "https://registry.npmjs.org/@img/sharp-libvips-darwin-x64/-/sharp-libvips-darwin-x64-1.3.4.tgz",
++      "integrity": "sha512-iR2OKH80yi0U+dUplyh3/xdpFvps6YkCwsXenIJxqxR1v9o+xtKTGbS9H7cps+2Vxjc8B1j96p75NmTGjIhtpQ==",
++      "cpu": [
++        "x64"
++      ],
++      "license": "LGPL-3.0-or-later",
++      "optional": true,
++      "os": [
++        "darwin"
++      ],
++      "funding": {
++        "url": "https://opencollective.com/libvips"
++      }
++    },
++    "node_modules/@img/sharp-libvips-linux-arm": {
++      "version": "1.3.4",
++      "resolved": "https://registry.npmjs.org/@img/sharp-libvips-linux-arm/-/sharp-libvips-linux-arm-1.3.4.tgz",
++      "integrity": "sha512-LmRtTsOHuvM2+wlO2Db37dx5MiZhB0FvSunciw48YjdOkZz9KAiRbm8ujeMOA1INqmei5NapFxYEK1D1ZSidmw==",
++      "cpu": [
++        "arm"
++      ],
++      "libc": [
++        "glibc"
++      ],
++      "license": "LGPL-3.0-or-later",
++      "optional": true,
++      "os": [
++        "linux"
++      ],
++      "funding": {
++        "url": "https://opencollective.com/libvips"
++      }
++    },
++    "node_modules/@img/sharp-libvips-linux-arm64": {
++      "version": "1.3.4",
++      "resolved": "https://registry.npmjs.org/@img/sharp-libvips-linux-arm64/-/sharp-libvips-linux-arm64-1.3.4.tgz",
++      "integrity": "sha512-Y3dgX/6lE2QhQb+Gxy0WZxfg9MEm/JBjamZpS2IklP7xIQoKN4hzAm7KcMVGtaVDt3neE9OKBC7vAfonA/Lr1A==",
++      "cpu": [
++        "arm64"
++      ],
++      "libc": [
++        "glibc"
++      ],
++      "license": "LGPL-3.0-or-later",
++      "optional": true,
++      "os": [
++        "linux"
++      ],
++      "funding": {
++        "url": "https://opencollective.com/libvips"
++      }
++    },
++    "node_modules/@img/sharp-libvips-linux-ppc64": {
++      "version": "1.3.4",
++      "resolved": "https://registry.npmjs.org/@img/sharp-libvips-linux-ppc64/-/sharp-libvips-linux-ppc64-1.3.4.tgz",
++      "integrity": "sha512-Le6boB8Tai0Nis+gIxIpKx68UDVVIqdR8Tin5Yf1z2LJJQLDJvCDRqRu+jC2qCoD+eIomonmOwB4smBRxfVpYQ==",
++      "cpu": [
++        "ppc64"
++      ],
++      "libc": [
++        "glibc"
++      ],
++      "license": "LGPL-3.0-or-later",
++      "optional": true,
++      "os": [
++        "linux"
++      ],
++      "funding": {
++        "url": "https://opencollective.com/libvips"
++      }
++    },
++    "node_modules/@img/sharp-libvips-linux-riscv64": {
++      "version": "1.3.4",
++      "resolved": "https://registry.npmjs.org/@img/sharp-libvips-linux-riscv64/-/sharp-libvips-linux-riscv64-1.3.4.tgz",
++      "integrity": "sha512-aHkkIEHPRdQEegJN20MLmGtxYD9R2wQr3Cwpddnu5+YKMt6Uzax7S9h5gpZTo8wyrGuZSlfQ63OevL5mTyOC7Q==",
++      "cpu": [
++        "riscv64"
++      ],
++      "libc": [
++        "glibc"
++      ],
++      "license": "LGPL-3.0-or-later",
++      "optional": true,
++      "os": [
++        "linux"
++      ],
++      "funding": {
++        "url": "https://opencollective.com/libvips"
++      }
++    },
++    "node_modules/@img/sharp-libvips-linux-s390x": {
++      "version": "1.3.4",
++      "resolved": "https://registry.npmjs.org/@img/sharp-libvips-linux-s390x/-/sharp-libvips-linux-s390x-1.3.4.tgz",
++      "integrity": "sha512-ra/mB6MikESDUO7Yg+Mi95bFBb9GsObURuhnOv3OqknjGe9sZrG8tCe9q0xSIGrtLgvgw0gKnFWcK4blSgQOuQ==",
++      "cpu": [
++        "s390x"
++      ],
++      "libc": [
++        "glibc"
++      ],
++      "license": "LGPL-3.0-or-later",
++      "optional": true,
++      "os": [
++        "linux"
++      ],
++      "funding": {
++        "url": "https://opencollective.com/libvips"
++      }
++    },
++    "node_modules/@img/sharp-libvips-linux-x64": {
++      "version": "1.3.4",
++      "resolved": "https://registry.npmjs.org/@img/sharp-libvips-linux-x64/-/sharp-libvips-linux-x64-1.3.4.tgz",
++      "integrity": "sha512-GJ//SSXbnwSDes02umB3nDJLFcQzw8a18V8fyhqr6tV515tOEMdImjjxj1AoafMRz56F3PHgftnj1QEKSU1zkw==",
++      "cpu": [
++        "x64"
++      ],
++      "libc": [
++        "glibc"
++      ],
++      "license": "LGPL-3.0-or-later",
++      "optional": true,
++      "os": [
++        "linux"
++      ],
++      "funding": {
++        "url": "https://opencollective.com/libvips"
++      }
++    },
++    "node_modules/@img/sharp-libvips-linuxmusl-arm64": {
++      "version": "1.3.4",
++      "resolved": "https://registry.npmjs.org/@img/sharp-libvips-linuxmusl-arm64/-/sharp-libvips-linuxmusl-arm64-1.3.4.tgz",
++      "integrity": "sha512-hvulFwtjUcagsis6BBxHwGFwWoNZjgYmULGVrZcyfNbjA8hKILbRxGg15/7w5HDyXHXUos/j6baAWqnCyQ2DWA==",
++      "cpu": [
++        "arm64"
++      ],
++      "libc": [
++        "musl"
++      ],
++      "license": "LGPL-3.0-or-later",
++      "optional": true,
++      "os": [
++        "linux"
++      ],
++      "funding": {
++        "url": "https://opencollective.com/libvips"
++      }
++    },
++    "node_modules/@img/sharp-libvips-linuxmusl-x64": {
++      "version": "1.3.4",
++      "resolved": "https://registry.npmjs.org/@img/sharp-libvips-linuxmusl-x64/-/sharp-libvips-linuxmusl-x64-1.3.4.tgz",
++      "integrity": "sha512-6zXKeE/p39I1AmA3cJG35eyBGNqNddLnUXjhwBnsGjFPWqf5VKkDBEqaEkPDoTEtkxwi2vv8Tcr2mDyP4So7Fg==",
++      "cpu": [
++        "x64"
++      ],
++      "libc": [
++        "musl"
++      ],
++      "license": "LGPL-3.0-or-later",
++      "optional": true,
++      "os": [
++        "linux"
++      ],
++      "funding": {
++        "url": "https://opencollective.com/libvips"
++      }
++    },
++    "node_modules/@img/sharp-linux-arm": {
++      "version": "0.35.5",
++      "resolved": "https://registry.npmjs.org/@img/sharp-linux-arm/-/sharp-linux-arm-0.35.5.tgz",
++      "integrity": "sha512-LEaXK2WdXVK5ykcw0buWyPMsmLLL2vpHLD6yrNSW+JGEL3BZPA4tpKN6iaMc4AxTTAoaX/sU1rOL51lcIz48ZQ==",
++      "cpu": [
++        "arm"
++      ],
++      "libc": [
++        "glibc"
++      ],
++      "license": "Apache-2.0",
++      "optional": true,
++      "os": [
++        "linux"
++      ],
++      "engines": {
++        "node": ">=20.9.0"
++      },
++      "funding": {
++        "url": "https://opencollective.com/libvips"
++      },
++      "optionalDependencies": {
++        "@img/sharp-libvips-linux-arm": "1.3.4"
++      }
++    },
++    "node_modules/@img/sharp-linux-arm64": {
++      "version": "0.35.5",
++      "resolved": "https://registry.npmjs.org/@img/sharp-linux-arm64/-/sharp-linux-arm64-0.35.5.tgz",
++      "integrity": "sha512-LYVx5JTsOM2CBzmxreh+nl64/3H6Xb09iSLknqH47z2T2DFFxDeFLP5y4dJwe6H7uGQlHPyEEtIqyo3DYsRwdQ==",
++      "cpu": [
++        "arm64"
++      ],
++      "libc": [
++        "glibc"
++      ],
++      "license": "Apache-2.0",
++      "optional": true,
++      "os": [
++        "linux"
++      ],
++      "engines": {
++        "node": ">=20.9.0"
++      },
++      "funding": {
++        "url": "https://opencollective.com/libvips"
++      },
++      "optionalDependencies": {
++        "@img/sharp-libvips-linux-arm64": "1.3.4"
++      }
++    },
++    "node_modules/@img/sharp-linux-ppc64": {
++      "version": "0.35.5",
++      "resolved": "https://registry.npmjs.org/@img/sharp-linux-ppc64/-/sharp-linux-ppc64-0.35.5.tgz",
++      "integrity": "sha512-QVxAAq8evVRI9ia2vqgwrmWucn5Dfv+JdWzj75pD8omHLPSP7f8p20O8jxzjCcuCEQEOtYOZUmX1hkiZ0kdevA==",
++      "cpu": [
++        "ppc64"
++      ],
++      "libc": [
++        "glibc"
++      ],
++      "license": "Apache-2.0",
++      "optional": true,
++      "os": [
++        "linux"
++      ],
++      "engines": {
++        "node": ">=20.9.0"
++      },
++      "funding": {
++        "url": "https://opencollective.com/libvips"
++      },
++      "optionalDependencies": {
++        "@img/sharp-libvips-linux-ppc64": "1.3.4"
++      }
++    },
++    "node_modules/@img/sharp-linux-riscv64": {
++      "version": "0.35.5",
++      "resolved": "https://registry.npmjs.org/@img/sharp-linux-riscv64/-/sharp-linux-riscv64-0.35.5.tgz",
++      "integrity": "sha512-LtdreXguaavKODPIfzJ4kffx7UNt1omwtK0rch4EBbbSTXPnxWmYSayXdLJw0fJzQ97kHt1gL/yh4tvU+nCyRQ==",
++      "cpu": [
++        "riscv64"
++      ],
++      "libc": [
++        "glibc"
++      ],
++      "license": "Apache-2.0",
++      "optional": true,
++      "os": [
++        "linux"
++      ],
++      "engines": {
++        "node": ">=20.9.0"
++      },
++      "funding": {
++        "url": "https://opencollective.com/libvips"
++      },
++      "optionalDependencies": {
++        "@img/sharp-libvips-linux-riscv64": "1.3.4"
++      }
++    },
++    "node_modules/@img/sharp-linux-s390x": {
++      "version": "0.35.5",
++      "resolved": "https://registry.npmjs.org/@img/sharp-linux-s390x/-/sharp-linux-s390x-0.35.5.tgz",
++      "integrity": "sha512-UZasTOFiYzotTsGOCu42BfUzP6Tu6Do/947iRm1RsLKvlllxwGcn4RN27LibGWceix4Y+Pmw3jsnTcCQIgWjqA==",
++      "cpu": [
++        "s390x"
++      ],
++      "libc": [
++        "glibc"
++      ],
++      "license": "Apache-2.0",
++      "optional": true,
++      "os": [
++        "linux"
++      ],
++      "engines": {
++        "node": ">=20.9.0"
++      },
++      "funding": {
++        "url": "https://opencollective.com/libvips"
++      },
++      "optionalDependencies": {
++        "@img/sharp-libvips-linux-s390x": "1.3.4"
++      }
++    },
++    "node_modules/@img/sharp-linux-x64": {
++      "version": "0.35.5",
++      "resolved": "https://registry.npmjs.org/@img/sharp-linux-x64/-/sharp-linux-x64-0.35.5.tgz",
++      "integrity": "sha512-SxFtLTeJInhAA9Q836kux2vZNeOBQEx658qvbboZScr0wIARym3IcGmW7KpVD5sbVg0Ojy+udFQdayYIZyoNog==",
++      "cpu": [
++        "x64"
++      ],
++      "libc": [
++        "glibc"
++      ],
++      "license": "Apache-2.0",
++      "optional": true,
++      "os": [
++        "linux"
++      ],
++      "engines": {
++        "node": ">=20.9.0"
++      },
++      "funding": {
++        "url": "https://opencollective.com/libvips"
++      },
++      "optionalDependencies": {
++        "@img/sharp-libvips-linux-x64": "1.3.4"
++      }
++    },
++    "node_modules/@img/sharp-linuxmusl-arm64": {
++      "version": "0.35.5",
++      "resolved": "https://registry.npmjs.org/@img/sharp-linuxmusl-arm64/-/sharp-linuxmusl-arm64-0.35.5.tgz",
++      "integrity": "sha512-9HbMclmI1zlNkFRs3z9/eBtDjfD0sGlrX1z6b1qwmiFY5ElDLh4BC0LPBdVp7z1DXFiKlIcznf+ZlsuZzLxQqg==",
++      "cpu": [
++        "arm64"
++      ],
++      "libc": [
++        "musl"
++      ],
++      "license": "Apache-2.0",
++      "optional": true,
++      "os": [
++        "linux"
++      ],
++      "engines": {
++        "node": ">=20.9.0"
++      },
++      "funding": {
++        "url": "https://opencollective.com/libvips"
++      },
++      "optionalDependencies": {
++        "@img/sharp-libvips-linuxmusl-arm64": "1.3.4"
++      }
++    },
++    "node_modules/@img/sharp-linuxmusl-x64": {
++      "version": "0.35.5",
++      "resolved": "https://registry.npmjs.org/@img/sharp-linuxmusl-x64/-/sharp-linuxmusl-x64-0.35.5.tgz",
++      "integrity": "sha512-4KOphqB035HrVdqLZfCgMzzERrQkkzOwRhl4OAkRO1YCldbaFjySXMaK534Mo0V+LndnlJk+sbUyLeU0ULyD1A==",
++      "cpu": [
++        "x64"
++      ],
++      "libc": [
++        "musl"
++      ],
++      "license": "Apache-2.0",
++      "optional": true,
++      "os": [
++        "linux"
++      ],
++      "engines": {
++        "node": ">=20.9.0"
++      },
++      "funding": {
++        "url": "https://opencollective.com/libvips"
++      },
++      "optionalDependencies": {
++        "@img/sharp-libvips-linuxmusl-x64": "1.3.4"
++      }
++    },
++    "node_modules/@img/sharp-wasm32": {
++      "version": "0.35.5",
++      "resolved": "https://registry.npmjs.org/@img/sharp-wasm32/-/sharp-wasm32-0.35.5.tgz",
++      "integrity": "sha512-Ptsga1su4tQx+LLF1ECS9U6nz5kmrXKo6XVbtR48Ke3ZRxxgaWBu7IDtEe1quo8hiupwm6WFqxVlXaSf7IINGQ==",
++      "license": "Apache-2.0 AND LGPL-3.0-or-later AND MIT",
++      "optional": true,
++      "dependencies": {
++        "@emnapi/runtime": "^1.11.3"
++      },
++      "engines": {
++        "node": ">=20.9.0"
++      },
++      "funding": {
++        "url": "https://opencollective.com/libvips"
++      }
++    },
++    "node_modules/@img/sharp-webcontainers-wasm32": {
++      "version": "0.35.5",
++      "resolved": "https://registry.npmjs.org/@img/sharp-webcontainers-wasm32/-/sharp-webcontainers-wasm32-0.35.5.tgz",
++      "integrity": "sha512-hfhF/FmoQyTUkA0bIKFOtw536BQSeBMe6BF6QyWlrPxT754+TFLaZ7sKKTfvvM0yJgKgaYTwnFCIZ/GuDw5SUA==",
++      "cpu": [
++        "wasm32"
++      ],
++      "license": "Apache-2.0",
++      "optional": true,
++      "dependencies": {
++        "@img/sharp-wasm32": "0.35.5"
++      },
++      "engines": {
++        "node": ">=20.9.0"
++      },
++      "funding": {
++        "url": "https://opencollective.com/libvips"
++      }
++    },
++    "node_modules/@img/sharp-win32-arm64": {
++      "version": "0.35.5",
++      "resolved": "https://registry.npmjs.org/@img/sharp-win32-arm64/-/sharp-win32-arm64-0.35.5.tgz",
++      "integrity": "sha512-X4t7g+7ZA5DKblCBEXGjUqqemj4vczING/5viFwAL8h4N3qYeyjwdCvRLHi4EdOUI+2Z7UFlp1VM+p/AuEtm6Q==",
++      "cpu": [
++        "arm64"
++      ],
++      "license": "Apache-2.0 AND LGPL-3.0-or-later",
++      "optional": true,
++      "os": [
++        "win32"
++      ],
++      "engines": {
++        "node": ">=20.9.0"
++      },
++      "funding": {
++        "url": "https://opencollective.com/libvips"
++      }
++    },
++    "node_modules/@img/sharp-win32-ia32": {
++      "version": "0.35.5",
++      "resolved": "https://registry.npmjs.org/@img/sharp-win32-ia32/-/sharp-win32-ia32-0.35.5.tgz",
++      "integrity": "sha512-5Zm82LoBc43nhwNybZlG7Y1KO//Zhsn306fQl29ZOuStHLGTo3BWL83q3cznX0poxSAMuYL1On/BHBxkBeKr6A==",
++      "cpu": [
++        "ia32"
++      ],
++      "license": "Apache-2.0 AND LGPL-3.0-or-later",
++      "optional": true,
++      "os": [
++        "win32"
++      ],
++      "engines": {
++        "node": "^20.9.0"
++      },
++      "funding": {
++        "url": "https://opencollective.com/libvips"
++      }
++    },
++    "node_modules/@img/sharp-win32-x64": {
++      "version": "0.35.5",
++      "resolved": "https://registry.npmjs.org/@img/sharp-win32-x64/-/sharp-win32-x64-0.35.5.tgz",
++      "integrity": "sha512-x76eH0vEiHlcMQu8Y8IenntaACtddpT6W0wmXtWrnKcnKI7ME5DdgqhAD6SEWOEl1v2zDvkZDhFA9KnURwpfqg==",
++      "cpu": [
++        "x64"
++      ],
++      "license": "Apache-2.0 AND LGPL-3.0-or-later",
++      "optional": true,
++      "os": [
++        "win32"
++      ],
++      "engines": {
++        "node": ">=20.9.0"
++      },
++      "funding": {
++        "url": "https://opencollective.com/libvips"
++      }
++    },
++    "node_modules/@next/env": {
++      "version": "16.4.6",
++      "resolved": "https://registry.npmjs.org/@next/env/-/env-16.4.6.tgz",
++      "integrity": "sha512-SunBjJ6t+oBtecS3dTjdVuMhUogP5wD/vrGL5EVuQYM1iS4O5ilL51HkiJ3sPjMzRHiCChvr4dbaSJbR7F3lxA==",
++      "license": "MIT"
++    },
++    "node_modules/@next/swc-darwin-arm64": {
++      "version": "16.4.6",
++      "resolved": "https://registry.npmjs.org/@next/swc-darwin-arm64/-/swc-darwin-arm64-16.4.6.tgz",
++      "integrity": "sha512-kJ4VVZkley17xKaJx72QN2IBqjrj7zenCQZaUF0l9ShS/1Mt2kW4+Z5KGG6vgr3L/J562xTOizVyM1iA/u5nlg==",
++      "cpu": [
++        "arm64"
++      ],
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "darwin"
++      ],
++      "engines": {
++        "node": ">= 10"
++      }
++    },
++    "node_modules/@next/swc-darwin-x64": {
++      "version": "16.4.6",
++      "resolved": "https://registry.npmjs.org/@next/swc-darwin-x64/-/swc-darwin-x64-16.4.6.tgz",
++      "integrity": "sha512-eIPGZIqC+8JKaeZmvnCANJQF4xWkkHqSnAAajtFxgwDMAOnCgxNvP52SeWZ41PyVwoe+Le/NQuZSaQ8j7YshSA==",
++      "cpu": [
++        "x64"
++      ],
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "darwin"
++      ],
++      "engines": {
++        "node": ">= 10"
++      }
++    },
++    "node_modules/@next/swc-linux-arm64-gnu": {
++      "version": "16.4.6",
++      "resolved": "https://registry.npmjs.org/@next/swc-linux-arm64-gnu/-/swc-linux-arm64-gnu-16.4.6.tgz",
++      "integrity": "sha512-9nI6O8vvczH2D9ZNdMGqb/3NuT15T9ksOZnAmx9/gjF2cOi74+xxyf1Hk96uIMfm14c9y6wHeBq6SH8g6udvcA==",
++      "cpu": [
++        "arm64"
++      ],
++      "libc": [
++        "glibc"
++      ],
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "linux"
++      ],
++      "engines": {
++        "node": ">= 10"
++      }
++    },
++    "node_modules/@next/swc-linux-arm64-musl": {
++      "version": "16.4.6",
++      "resolved": "https://registry.npmjs.org/@next/swc-linux-arm64-musl/-/swc-linux-arm64-musl-16.4.6.tgz",
++      "integrity": "sha512-7/qPhTxDp2ScluOJOhLuhWmlA17o1yZ0SIgpISBCpBxXgtnK4+KGywBpFkfLPiU1rnSM1faFGzYkH6i7JdTrqA==",
++      "cpu": [
++        "arm64"
++      ],
++      "libc": [
++        "musl"
++      ],
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "linux"
++      ],
++      "engines": {
++        "node": ">= 10"
++      }
++    },
++    "node_modules/@next/swc-linux-x64-gnu": {
++      "version": "16.4.6",
++      "resolved": "https://registry.npmjs.org/@next/swc-linux-x64-gnu/-/swc-linux-x64-gnu-16.4.6.tgz",
++      "integrity": "sha512-oOpbNa8XOW1qCGd9VvzC4fbkkRxEls7/WI6tz+YHC0xRA7KpV1U7DrAnCPjzVyOk/karzWEepCOcTIDmwK8FwQ==",
++      "cpu": [
++        "x64"
++      ],
++      "libc": [
++        "glibc"
++      ],
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "linux"
++      ],
++      "engines": {
++        "node": ">= 10"
++      }
++    },
++    "node_modules/@next/swc-linux-x64-musl": {
++      "version": "16.4.6",
++      "resolved": "https://registry.npmjs.org/@next/swc-linux-x64-musl/-/swc-linux-x64-musl-16.4.6.tgz",
++      "integrity": "sha512-aM8CZ+OR2EwXaAYw7KGkW2GDmNDsLBIRe1MMRZCJPTdw/xhTD0IMUVO4sf3KqrzuRouGzwwLZn34+gFeVXiUQA==",
++      "cpu": [
++        "x64"
++      ],
++      "libc": [
++        "musl"
++      ],
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "linux"
++      ],
++      "engines": {
++        "node": ">= 10"
++      }
++    },
++    "node_modules/@next/swc-win32-arm64-msvc": {
++      "version": "16.4.6",
++      "resolved": "https://registry.npmjs.org/@next/swc-win32-arm64-msvc/-/swc-win32-arm64-msvc-16.4.6.tgz",
++      "integrity": "sha512-U0p7/tEtqvHX2crhd841CDwKtp5CFkKXVjOhmfccR3Pvp64sj8KBwRqsvltqLOwVBbj0NtkxwXSDpEHYGbxeXQ==",
++      "cpu": [
++        "arm64"
++      ],
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "win32"
++      ],
++      "engines": {
++        "node": ">= 10"
++      }
++    },
++    "node_modules/@next/swc-win32-x64-msvc": {
++      "version": "16.4.6",
++      "resolved": "https://registry.npmjs.org/@next/swc-win32-x64-msvc/-/swc-win32-x64-msvc-16.4.6.tgz",
++      "integrity": "sha512-3ZG15/5WIdlTQsIEvc9sPTTSL5XFrlLklIKmfF4fwsDnoAhu6NcBDXsk3mbGxNyo6aVLEGex+fHCv2MahY7a9g==",
++      "cpu": [
++        "x64"
++      ],
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "win32"
++      ],
++      "engines": {
++        "node": ">= 10"
++      }
++    },
++    "node_modules/@pinojs/redact": {
++      "version": "0.4.0",
++      "resolved": "https://registry.npmjs.org/@pinojs/redact/-/redact-0.4.0.tgz",
++      "integrity": "sha512-k2ENnmBugE/rzQfEcdWHcCY+/FM3VLzH9cYEsbdsoqrvzAKRhUZeRNhAZvB8OitQJ1TBed3yqWtdjzS6wJKBwg==",
++      "license": "MIT"
++    },
++    "node_modules/@swc/helpers": {
++      "version": "0.5.23",
++      "resolved": "https://registry.npmjs.org/@swc/helpers/-/helpers-0.5.23.tgz",
++      "integrity": "sha512-5lSsMOTXURePglDfvuAQUqkGek9Hg2kksOYay2m0+XR++b2NWYL/4sWyuvVBIs8oKnJaxkdi9whaL/sqN13afw==",
++      "license": "Apache-2.0",
++      "dependencies": {
++        "tslib": "^2.8.0"
++      }
++    },
++    "node_modules/@types/node": {
++      "version": "24.19.2",
++      "resolved": "https://registry.npmjs.org/@types/node/-/node-24.19.2.tgz",
++      "integrity": "sha512-93d49wCWJkCyN87MxLpNN6KXPCwFw7bVUg79mGUV1OS40JGWwVCr8n61DXCSqz7CV6/VfPkb7xec7uP2M+QHWQ==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "undici-types": ">=7.24.0 <7.24.7"
++      }
++    },
++    "node_modules/@types/react": {
++      "version": "19.3.0",
++      "resolved": "https://registry.npmjs.org/@types/react/-/react-19.3.0.tgz",
++      "integrity": "sha512-N0rFCuH9YoxG9/m61l9MfpJKfmLOVU0em7ipIz6TRgSSkvReLB9vL85GB+yr8Bs5leqpvg96JSwF4ZS1s4viQg==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "csstype": "^3.2.2"
++      }
++    },
++    "node_modules/@types/react-dom": {
++      "version": "19.3.0",
++      "resolved": "https://registry.npmjs.org/@types/react-dom/-/react-dom-19.3.0.tgz",
++      "integrity": "sha512-ZI7bU42mZXXKHn/qNLEw2IrbiINU7X5+vfgdixBHkCNpYWXjKgfQ/P+uyGb5CjOLB9UcnTeg3rylQtV2hym44Q==",
++      "dev": true,
++      "license": "MIT",
++      "peerDependencies": {
++        "@types/react": "^19.3.0"
++      }
++    },
++    "node_modules/abstract-logging": {
++      "version": "2.0.1",
++      "resolved": "https://registry.npmjs.org/abstract-logging/-/abstract-logging-2.0.1.tgz",
++      "integrity": "sha512-2BjRTZxTPvheOvGbBslFSYOUkr+SjPtOnrLP33f+VIWLzezQpZcqVg7ja3L4dBXmzzgwT+a029jRx5PCi3JuiA==",
++      "license": "MIT"
++    },
++    "node_modules/ajv": {
++      "version": "8.20.0",
++      "resolved": "https://registry.npmjs.org/ajv/-/ajv-8.20.0.tgz",
++      "integrity": "sha512-Thbli+OlOj+iMPYFBVBfJ3OmCAnaSyNn4M1vz9T6Gka5Jt9ba/HIR56joy65tY6kx/FCF5VXNB819Y7/GUrBGA==",
++      "license": "MIT",
++      "dependencies": {
++        "fast-deep-equal": "^3.1.3",
++        "fast-uri": "^3.0.1",
++        "json-schema-traverse": "^1.0.0",
++        "require-from-string": "^2.0.2"
++      },
++      "funding": {
++        "type": "github",
++        "url": "https://github.com/sponsors/epoberezkin"
++      }
++    },
++    "node_modules/ajv-formats": {
++      "version": "3.0.1",
++      "resolved": "https://registry.npmjs.org/ajv-formats/-/ajv-formats-3.0.1.tgz",
++      "integrity": "sha512-8iUql50EUR+uUcdRQ3HDqa6EVyo3docL8g5WJ3FNcWmu62IbkGUue/pEyLBW8VGKKucTPgqeks4fIU1DA4yowQ==",
++      "license": "MIT",
++      "dependencies": {
++        "ajv": "^8.0.0"
++      },
++      "peerDependencies": {
++        "ajv": "^8.0.0"
++      },
++      "peerDependenciesMeta": {
++        "ajv": {
++          "optional": true
++        }
++      }
++    },
++    "node_modules/ajv/node_modules/fast-uri": {
++      "version": "3.1.9",
++      "resolved": "https://registry.npmjs.org/fast-uri/-/fast-uri-3.1.9.tgz",
++      "integrity": "sha512-hS/0Wt3Ya043oKXs0sIxrMpKQITXhMLIrVAKKXi4gozGC9v7YRWVnXIZzjNPTO02M9BdxLCWqK1yRXgNziVyJQ==",
++      "funding": [
++        {
++          "type": "github",
++          "url": "https://github.com/sponsors/fastify"
++        },
++        {
++          "type": "opencollective",
++          "url": "https://opencollective.com/fastify"
++        }
++      ],
++      "license": "BSD-3-Clause"
++    },
++    "node_modules/atomic-sleep": {
++      "version": "1.0.0",
++      "resolved": "https://registry.npmjs.org/atomic-sleep/-/atomic-sleep-1.0.0.tgz",
++      "integrity": "sha512-kNOjDqAh7px0XWNI+4QbzoiR/nTkHAWNud2uvnJquD1/x5a7EQZMJT0AczqK0Qn67oY/TTQ1LbUKajZpp3I9tQ==",
++      "license": "MIT",
++      "engines": {
++        "node": ">=8.0.0"
++      }
++    },
++    "node_modules/avvio": {
++      "version": "9.3.1",
++      "resolved": "https://registry.npmjs.org/avvio/-/avvio-9.3.1.tgz",
++      "integrity": "sha512-QyTKW61/qlba+cUQBm/sT9X8lri4UdomqSDwCnrnj1IvLVDRRiXRkz4CgBRWB+/cmfC7SK5WQc8T1vSdGvaUcQ==",
++      "funding": [
++        {
++          "type": "github",
++          "url": "https://github.com/sponsors/fastify"
++        },
++        {
++          "type": "opencollective",
++          "url": "https://opencollective.com/fastify"
++        }
++      ],
++      "license": "MIT",
++      "dependencies": {
++        "@fastify/error": "^4.0.0",
++        "fastq": "^1.17.1"
++      }
++    },
++    "node_modules/baseline-browser-mapping": {
++      "version": "2.11.39",
++      "resolved": "https://registry.npmjs.org/baseline-browser-mapping/-/baseline-browser-mapping-2.11.39.tgz",
++      "integrity": "sha512-Q9buOYhr2ggrEZpImICecZTJHCCd8yXkRUokFlUEQ8uiD6oP82F4W4jWnhOHZYV+wlvrC51V7Wy0ULyWjil5Wg==",
++      "license": "Apache-2.0",
++      "bin": {
++        "baseline-browser-mapping": "dist/cli.cjs"
++      },
++      "engines": {
++        "node": ">=6.0.0"
++      }
++    },
++    "node_modules/caniuse-lite": {
++      "version": "1.0.30001826",
++      "resolved": "https://registry.npmjs.org/caniuse-lite/-/caniuse-lite-1.0.30001826.tgz",
++      "integrity": "sha512-wTB+9tIbLro/BCXwLuNV1meHE4L9dS6dArMDwgYfNBPMYScqClHyGunhkCSDtHhe/69Xl0sHlKgBVZ+fNsYtWA==",
++      "funding": [
++        {
++          "type": "opencollective",
++          "url": "https://opencollective.com/browserslist"
++        },
++        {
++          "type": "tidelift",
++          "url": "https://tidelift.com/funding/github/npm/caniuse-lite"
++        },
++        {
++          "type": "github",
++          "url": "https://github.com/sponsors/ai"
++        }
++      ],
++      "license": "CC-BY-4.0"
++    },
++    "node_modules/client-only": {
++      "version": "0.0.1",
++      "resolved": "https://registry.npmjs.org/client-only/-/client-only-0.0.1.tgz",
++      "integrity": "sha512-IV3Ou0jSMzZrd3pZ48nLkT9DA7Ag1pnPzaiQhpW7c3RbcqqzvzzVu+L8gfqMp/8IM2MQtSiqaCxrrcfu8I8rMA==",
++      "license": "MIT"
++    },
++    "node_modules/cookie": {
++      "version": "2.0.2",
++      "resolved": "https://registry.npmjs.org/cookie/-/cookie-2.0.2.tgz",
++      "integrity": "sha512-SL0cVuEdETEp7pN0FuZb01toc3vnODEfVUCooxG1SJN0yIirh7JMb9X9bvfCFf0vzzbT68RdbKDHYTiWy7a7iw==",
++      "license": "MIT",
++      "engines": {
++        "node": ">=22"
++      },
++      "funding": {
++        "type": "opencollective",
++        "url": "https://opencollective.com/express"
++      }
++    },
++    "node_modules/csstype": {
++      "version": "3.2.4",
++      "resolved": "https://registry.npmjs.org/csstype/-/csstype-3.2.4.tgz",
++      "integrity": "sha512-PoKaoPzQapnEoqUSnHx1u6W6ku8CVEgKsnpmmzU3m1nwkidpPBQ8V/Zq2+bWNrsOKoKLwTGdbx6xF7BXP1zLVQ==",
++      "dev": true,
++      "license": "MIT"
++    },
++    "node_modules/dequal": {
++      "version": "2.0.3",
++      "resolved": "https://registry.npmjs.org/dequal/-/dequal-2.0.3.tgz",
++      "integrity": "sha512-0je+qPKHEMohvfRTCEo3CrPG6cAzAYgmzKyxRiYSSDkS6eGJdyVJm7WaYA5ECaAD9wLB2T4EEeymA5aFVcYXCA==",
++      "license": "MIT",
++      "engines": {
++        "node": ">=6"
++      }
++    },
++    "node_modules/detect-libc": {
++      "version": "2.1.2",
++      "resolved": "https://registry.npmjs.org/detect-libc/-/detect-libc-2.1.2.tgz",
++      "integrity": "sha512-Btj2BOOO83o3WyH59e8MgXsxEQVcarkUOpEYrubB0urwnN10yQ364rsiByU11nZlqWYZm05i/of7io4mzihBtQ==",
++      "license": "Apache-2.0",
++      "optional": true,
++      "engines": {
++        "node": ">=8"
++      }
++    },
++    "node_modules/fast-decode-uri-component": {
++      "version": "1.0.1",
++      "resolved": "https://registry.npmjs.org/fast-decode-uri-component/-/fast-decode-uri-component-1.0.1.tgz",
++      "integrity": "sha512-WKgKWg5eUxvRZGwW8FvfbaH7AXSh2cL+3j5fMGzUMCxWBJ3dV3a7Wz8y2f/uQ0e3B6WmodD3oS54jTQ9HVTIIg==",
++      "license": "MIT"
++    },
++    "node_modules/fast-deep-equal": {
++      "version": "3.1.3",
++      "resolved": "https://registry.npmjs.org/fast-deep-equal/-/fast-deep-equal-3.1.3.tgz",
++      "integrity": "sha512-f3qQ9oQy9j2AhBe/H9VC91wLmKBCCU/gDOnKNAYG5hswO7BLKj09Hc5HYNz9cGI++xlpDCIgDaitVs03ATR84Q==",
++      "license": "MIT"
++    },
++    "node_modules/fast-json-stringify": {
++      "version": "7.3.9",
++      "resolved": "https://registry.npmjs.org/fast-json-stringify/-/fast-json-stringify-7.3.9.tgz",
++      "integrity": "sha512-5wxgeniisjX/pgaAeCN9tTizOhMEl5sZepJ+8N0YfFCRjc4X3BcDlswqgbBMFghbsRPVhnmFovdmdo0vpfIZ+g==",
++      "funding": [
++        {
++          "type": "github",
++          "url": "https://github.com/sponsors/fastify"
++        },
++        {
++          "type": "opencollective",
++          "url": "https://opencollective.com/fastify"
++        }
++      ],
++      "license": "MIT",
++      "dependencies": {
++        "@fastify/merge-json-schemas": "^0.2.0",
++        "ajv": "^8.12.0",
++        "ajv-formats": "^3.0.1",
++        "fast-uri": "^4.0.0",
++        "json-schema-ref-resolver": "^3.0.0",
++        "rfdc": "^1.2.0"
++      }
++    },
++    "node_modules/fast-querystring": {
++      "version": "1.1.2",
++      "resolved": "https://registry.npmjs.org/fast-querystring/-/fast-querystring-1.1.2.tgz",
++      "integrity": "sha512-g6KuKWmFXc0fID8WWH0jit4g0AGBoJhCkJMb1RmbsSEUNvQ+ZC8D6CUZ+GtF8nMzSPXnhiePyyqqipzNNEnHjg==",
++      "license": "MIT",
++      "dependencies": {
++        "fast-decode-uri-component": "^1.0.1"
++      }
++    },
++    "node_modules/fast-uri": {
++      "version": "4.2.3",
++      "resolved": "https://registry.npmjs.org/fast-uri/-/fast-uri-4.2.3.tgz",
++      "integrity": "sha512-I1PXwP5eAhlNlcdpjt9CgB59op2ZvZfxw+BkqGFVIUOgNpCVTcTqp3HhTX7brxj5vsip+nSY4nTvff+eIA76hg==",
++      "funding": [
++        {
++          "type": "github",
++          "url": "https://github.com/sponsors/fastify"
++        },
++        {
++          "type": "opencollective",
++          "url": "https://opencollective.com/fastify"
++        }
++      ],
++      "license": "BSD-3-Clause"
++    },
++    "node_modules/fastify": {
++      "version": "5.12.8",
++      "resolved": "https://registry.npmjs.org/fastify/-/fastify-5.12.8.tgz",
++      "integrity": "sha512-moP8exb2sCHLUbJkwp+I6C0padhy4D8lp0SdmzY7HhSdZuqm7O/u3o2aq7u8okaQ//33QDzj3G/u+FsSdB8Qzw==",
++      "funding": [
++        {
++          "type": "github",
++          "url": "https://github.com/sponsors/fastify"
++        },
++        {
++          "type": "opencollective",
++          "url": "https://opencollective.com/fastify"
++        }
++      ],
++      "license": "MIT",
++      "dependencies": {
++        "@fastify/ajv-compiler": "^4.0.5",
++        "@fastify/error": "^4.0.0",
++        "@fastify/fast-json-stringify-compiler": "^5.0.0",
++        "@fastify/proxy-addr": "^5.0.0",
++        "abstract-logging": "^2.0.1",
++        "avvio": "^9.0.0",
++        "fast-json-stringify": "^7.0.0",
++        "find-my-way": "^9.10.0",
++        "light-my-request": "^6.0.0",
++        "pino": "^9.14.0 || ^10.1.0",
++        "process-warning": "^5.1.0",
++        "rfdc": "^1.3.1",
++        "secure-json-parse": "^4.0.0",
++        "semver": "^7.6.0",
++        "toad-cache": "^3.7.0"
++      }
++    },
++    "node_modules/fastq": {
++      "version": "1.20.3",
++      "resolved": "https://registry.npmjs.org/fastq/-/fastq-1.20.3.tgz",
++      "integrity": "sha512-XKv5nnLs6nLF71NgiKJLIZFLkPyIEuOselLG7ujZnGrRfQK8HpvY+WqKhAJUAdLomwVHErVS4LfxFlPq0/FTAw==",
++      "license": "ISC",
++      "dependencies": {
++        "reusify": "^1.0.4"
++      }
++    },
++    "node_modules/find-my-way": {
++      "version": "9.10.2",
++      "resolved": "https://registry.npmjs.org/find-my-way/-/find-my-way-9.10.2.tgz",
++      "integrity": "sha512-gbLMuTm2FV5QiRh/eM0uhL4nyOvbSqqa2K3mASAtkIqxvY8ZmoLOCLMd2syLWT/SyhrvOR7GPxOKj/kcV6o8bg==",
++      "license": "MIT",
++      "dependencies": {
++        "fast-deep-equal": "^3.1.3",
++        "fast-querystring": "^1.0.0",
++        "safe-regex2": "^5.0.0"
++      },
++      "engines": {
++        "node": ">=20"
++      }
++    },
++    "node_modules/ipaddr.js": {
++      "version": "2.5.0",
++      "resolved": "https://registry.npmjs.org/ipaddr.js/-/ipaddr.js-2.5.0.tgz",
++      "integrity": "sha512-aq+t5NAc+cS6rZQQVWC2x98CPqGtKKTMDd4Gaodv0wShnItdKg/51djkGJ1hqH+Oy0ivDftCbSLCQob8zso01w==",
++      "license": "MIT",
++      "engines": {
++        "node": ">= 10"
++      }
++    },
++    "node_modules/json-schema-ref-resolver": {
++      "version": "3.0.1",
++      "resolved": "https://registry.npmjs.org/json-schema-ref-resolver/-/json-schema-ref-resolver-3.0.1.tgz",
++      "integrity": "sha512-w+HwgljXpVwZ3IidoUR1qPZxSOQ+NRQWuVe6a5pe8XbHsNZE4UAwVPUvzZagn7yBKbJtt6UJnRFYbNTRPZI45Q==",
++      "funding": [
++        {
++          "type": "github",
++          "url": "https://github.com/sponsors/fastify"
++        },
++        {
++          "type": "opencollective",
++          "url": "https://opencollective.com/fastify"
++        }
++      ],
++      "license": "MIT",
++      "dependencies": {
++        "dequal": "^2.0.3"
++      }
++    },
++    "node_modules/json-schema-traverse": {
++      "version": "1.0.0",
++      "resolved": "https://registry.npmjs.org/json-schema-traverse/-/json-schema-traverse-1.0.0.tgz",
++      "integrity": "sha512-NM8/P9n3XjXhIZn1lLhkFaACTOURQXjWhV4BA/RnOv8xvgqtqpAX9IO4mRQxSx1Rlo4tqzeqb0sOlruaOy3dug==",
++      "license": "MIT"
++    },
++    "node_modules/light-my-request": {
++      "version": "6.8.1",
++      "resolved": "https://registry.npmjs.org/light-my-request/-/light-my-request-6.8.1.tgz",
++      "integrity": "sha512-20biUK0HAIPG9BZOK3/4s8uVAkAoi1+qW55lciHZCR0puTWipBgyMPEUjqXDWLjsZeqfO6DGsuwW5eyfsTGtyg==",
++      "funding": [
++        {
++          "type": "github",
++          "url": "https://github.com/sponsors/fastify"
++        },
++        {
++          "type": "opencollective",
++          "url": "https://opencollective.com/fastify"
++        }
++      ],
++      "license": "BSD-3-Clause",
++      "dependencies": {
++        "@fastify/deepmerge": "^3.1.0",
++        "cookie": "^2.0.0",
++        "process-warning": "^5.0.0",
++        "set-cookie-parser": "^3.0.1"
++      }
++    },
++    "node_modules/nanoid": {
++      "version": "3.3.20",
++      "resolved": "https://registry.npmjs.org/nanoid/-/nanoid-3.3.20.tgz",
++      "integrity": "sha512-uKdg2G3GNCKQn9byYOpxbGqrT2fGO5KRt5J/8b3pok8rT6qxGWF6hxMyJiEYtAf+FVyYuD9hRaDqX5uPFYJ4ZQ==",
++      "funding": [
++        {
++          "type": "github",
++          "url": "https://github.com/sponsors/ai"
++        }
++      ],
++      "license": "MIT",
++      "bin": {
++        "nanoid": "bin/nanoid.cjs"
++      },
++      "engines": {
++        "node": "^10 || ^12 || ^13.7 || ^14 || >=15.0.1"
++      }
++    },
++    "node_modules/next": {
++      "version": "16.4.6",
++      "resolved": "https://registry.npmjs.org/next/-/next-16.4.6.tgz",
++      "integrity": "sha512-QZJiYhaZLJMo2KpkQGQIwvmd79WVsAWeYIU554a8d7zArS3si/IRy3lBNV/rtYhE70oLwdLYhPAXLPx8HwcwtA==",
++      "license": "MIT",
++      "dependencies": {
++        "@next/env": "16.4.6",
++        "@swc/helpers": "0.5.23",
++        "baseline-browser-mapping": "^2.9.19",
++        "caniuse-lite": "^1.0.30001579",
++        "postcss": "8.5.23",
++        "styled-jsx": "5.1.6"
++      },
++      "bin": {
++        "next": "dist/bin/next"
++      },
++      "engines": {
++        "node": ">=20.9.0"
++      },
++      "optionalDependencies": {
++        "@next/swc-darwin-arm64": "16.4.6",
++        "@next/swc-darwin-x64": "16.4.6",
++        "@next/swc-linux-arm64-gnu": "16.4.6",
++        "@next/swc-linux-arm64-musl": "16.4.6",
++        "@next/swc-linux-x64-gnu": "16.4.6",
++        "@next/swc-linux-x64-musl": "16.4.6",
++        "@next/swc-win32-arm64-msvc": "16.4.6",
++        "@next/swc-win32-x64-msvc": "16.4.6",
++        "sharp": "^0.35.5"
++      },
++      "peerDependencies": {
++        "@opentelemetry/api": "^1.1.0",
++        "@playwright/test": "^1.51.1",
++        "babel-plugin-react-compiler": "*",
++        "react": "^18.2.0 || 19.0.0-rc-de68d2f4-20241204 || ^19.0.0",
++        "react-dom": "^18.2.0 || 19.0.0-rc-de68d2f4-20241204 || ^19.0.0",
++        "sass": "^1.3.0"
++      },
++      "peerDependenciesMeta": {
++        "@opentelemetry/api": {
++          "optional": true
++        },
++        "@playwright/test": {
++          "optional": true
++        },
++        "babel-plugin-react-compiler": {
++          "optional": true
++        },
++        "sass": {
++          "optional": true
++        }
++      }
++    },
++    "node_modules/on-exit-leak-free": {
++      "version": "2.1.2",
++      "resolved": "https://registry.npmjs.org/on-exit-leak-free/-/on-exit-leak-free-2.1.2.tgz",
++      "integrity": "sha512-0eJJY6hXLGf1udHwfNftBqH+g73EU4B504nZeKpz1sYRKafAghwxEJunB2O7rDZkL4PGfsMVnTXZ2EjibbqcsA==",
++      "license": "MIT",
++      "engines": {
++        "node": ">=14.0.0"
++      }
++    },
++    "node_modules/picocolors": {
++      "version": "1.1.1",
++      "resolved": "https://registry.npmjs.org/picocolors/-/picocolors-1.1.1.tgz",
++      "integrity": "sha512-xceH2snhtb5M9liqDsmEw56le376mTZkEX/jEb/RxNFyegNul7eNslCXP9FDj/Lcu0X8KEyMceP2ntpaHrDEVA==",
++      "license": "ISC"
++    },
++    "node_modules/pino": {
++      "version": "10.4.0",
++      "resolved": "https://registry.npmjs.org/pino/-/pino-10.4.0.tgz",
++      "integrity": "sha512-bk1ZMTwG/Vymx+zPoa28MhNzucFvXJWp3csrSuxuHPSMeUettaCoQ5Jvg07mtC4JGNpcfTwz41oVCnNgBK9+vA==",
++      "license": "MIT",
++      "dependencies": {
++        "@pinojs/redact": "^0.4.0",
++        "atomic-sleep": "^1.0.0",
++        "on-exit-leak-free": "^2.1.0",
++        "pino-abstract-transport": "^3.0.0",
++        "pino-std-serializers": "^7.0.0",
++        "process-warning": "^5.0.0",
++        "quick-format-unescaped": "^4.0.3",
++        "real-require": "^1.0.0",
++        "safe-stable-stringify": "^2.3.1",
++        "sonic-boom": "^4.0.1",
++        "thread-stream": "^4.0.0"
++      },
++      "bin": {
++        "pino": "bin.js"
++      }
++    },
++    "node_modules/pino-abstract-transport": {
++      "version": "3.0.0",
++      "resolved": "https://registry.npmjs.org/pino-abstract-transport/-/pino-abstract-transport-3.0.0.tgz",
++      "integrity": "sha512-wlfUczU+n7Hy/Ha5j9a/gZNy7We5+cXp8YL+X+PG8S0KXxw7n/JXA3c46Y0zQznIJ83URJiwy7Lh56WLokNuxg==",
++      "license": "MIT",
++      "dependencies": {
++        "split2": "^4.0.0"
++      }
++    },
++    "node_modules/pino-std-serializers": {
++      "version": "7.1.0",
++      "resolved": "https://registry.npmjs.org/pino-std-serializers/-/pino-std-serializers-7.1.0.tgz",
++      "integrity": "sha512-BndPH67/JxGExRgiX1dX0w1FvZck5Wa4aal9198SrRhZjH3GxKQUKIBnYJTdj2HDN3UQAS06HlfcSbQj2OHmaw==",
++      "license": "MIT"
++    },
++    "node_modules/postcss": {
++      "version": "8.5.23",
++      "resolved": "https://registry.npmjs.org/postcss/-/postcss-8.5.23.tgz",
++      "integrity": "sha512-g50586zr4bZmwFiTlflMu8E0bDTb5I5gertgwAKmsdUlTQIhZtunzUlD1WSzwcVWPoAVpsrA6vlfCD7oXvRwgg==",
++      "funding": [
++        {
++          "type": "opencollective",
++          "url": "https://opencollective.com/postcss/"
++        },
++        {
++          "type": "tidelift",
++          "url": "https://tidelift.com/funding/github/npm/postcss"
++        },
++        {
++          "type": "github",
++          "url": "https://github.com/sponsors/ai"
++        }
++      ],
++      "license": "MIT",
++      "dependencies": {
++        "nanoid": "^3.3.16",
++        "picocolors": "^1.1.1",
++        "source-map-js": "^1.2.1"
++      },
++      "engines": {
++        "node": "^10 || ^12 || >=14"
++      }
++    },
++    "node_modules/process-warning": {
++      "version": "5.1.1",
++      "resolved": "https://registry.npmjs.org/process-warning/-/process-warning-5.1.1.tgz",
++      "integrity": "sha512-oCkNVj4OKnKEcocVBcDfiIugN1/cE6rgfT3nCtzeqZPA8+rIxMaQ0xXzIkGP8Gj2qUaP1UR7uhJ1VD8lUCpzCg==",
++      "funding": [
++        {
++          "type": "github",
++          "url": "https://github.com/sponsors/fastify"
++        },
++        {
++          "type": "opencollective",
++          "url": "https://opencollective.com/fastify"
++        }
++      ],
++      "license": "MIT"
++    },
++    "node_modules/quick-format-unescaped": {
++      "version": "4.0.4",
++      "resolved": "https://registry.npmjs.org/quick-format-unescaped/-/quick-format-unescaped-4.0.4.tgz",
++      "integrity": "sha512-tYC1Q1hgyRuHgloV/YXs2w15unPVh8qfu/qCTfhTYamaw7fyhumKa2yGpdSo87vY32rIclj+4fWYQXUMs9EHvg==",
++      "license": "MIT"
++    },
++    "node_modules/react": {
++      "version": "19.3.1",
++      "resolved": "https://registry.npmjs.org/react/-/react-19.3.1.tgz",
++      "integrity": "sha512-QNhWdt7nrgVWWQG58QuGsAR3jv3Hbe4mb4vz7w2csnHavciZJgda1CPNaldF6eVxv90ud3jUXpKlHL69gO38yw==",
++      "license": "MIT",
++      "engines": {
++        "node": ">=0.10.0"
++      }
++    },
++    "node_modules/react-dom": {
++      "version": "19.3.1",
++      "resolved": "https://registry.npmjs.org/react-dom/-/react-dom-19.3.1.tgz",
++      "integrity": "sha512-Y0bARz53lhEC1NMCASs0/j+faB/zqt3R8hpvg1e8+61ZVJ4UL0UdC4cBbXfZMcIuhrfgeILTLe+ZeBCavQPtKQ==",
++      "license": "MIT",
++      "dependencies": {
++        "scheduler": "^0.28.0"
++      },
++      "peerDependencies": {
++        "react": "^19.3.1"
++      }
++    },
++    "node_modules/real-require": {
++      "version": "1.0.0",
++      "resolved": "https://registry.npmjs.org/real-require/-/real-require-1.0.0.tgz",
++      "integrity": "sha512-P4nbQYQfePJxRSmY+v/KINxVucm4NF3p3s7pJveMTtom52FR4YGltUQLB8idDXwDDWW+eYrWDFbuzUnjoWHF7g==",
++      "license": "MIT"
++    },
++    "node_modules/require-from-string": {
++      "version": "2.0.2",
++      "resolved": "https://registry.npmjs.org/require-from-string/-/require-from-string-2.0.2.tgz",
++      "integrity": "sha512-Xf0nWe6RseziFMu+Ap9biiUbmplq6S9/p+7w7YXP/JBHhrUDDUhwa+vANyubuqfZWTveU//DYVGsDG7RKL/vEw==",
++      "license": "MIT",
++      "engines": {
++        "node": ">=0.10.0"
++      }
++    },
++    "node_modules/ret": {
++      "version": "0.5.1",
++      "resolved": "https://registry.npmjs.org/ret/-/ret-0.5.1.tgz",
++      "integrity": "sha512-Z/nyvABwcRnRD2mMP7Kz6G1dFZZqX1mNErOnxF42OCQKE07b9k9hK9SQxHL3LFEZUdzQaLM4dId1E/E6Vm4WhA==",
++      "license": "MIT",
++      "engines": {
++        "node": ">=10"
++      }
++    },
++    "node_modules/reusify": {
++      "version": "1.1.0",
++      "resolved": "https://registry.npmjs.org/reusify/-/reusify-1.1.0.tgz",
++      "integrity": "sha512-g6QUff04oZpHs0eG5p83rFLhHeV00ug/Yf9nZM6fLeUrPguBTkTQOdpAWWspMh55TZfVQDPaN3NQJfbVRAxdIw==",
++      "license": "MIT",
++      "engines": {
++        "iojs": ">=1.0.0",
++        "node": ">=0.10.0"
++      }
++    },
++    "node_modules/rfdc": {
++      "version": "1.4.1",
++      "resolved": "https://registry.npmjs.org/rfdc/-/rfdc-1.4.1.tgz",
++      "integrity": "sha512-q1b3N5QkRUWUl7iyylaaj3kOpIT0N2i9MqIEQXP73GVsN9cw3fdx8X63cEmWhJGi2PPCF23Ijp7ktmd39rawIA==",
++      "license": "MIT"
++    },
++    "node_modules/safe-regex2": {
++      "version": "5.1.2",
++      "resolved": "https://registry.npmjs.org/safe-regex2/-/safe-regex2-5.1.2.tgz",
++      "integrity": "sha512-tAtCGFPPP02VroDVzp4daGi6bC7jWG+41D47GKf18FeH/ubvKQHT9VmhAkvtjNOmJwqtApzWeUpEhkyEYULvmw==",
++      "funding": [
++        {
++          "type": "github",
++          "url": "https://github.com/sponsors/fastify"
++        },
++        {
++          "type": "opencollective",
++          "url": "https://opencollective.com/fastify"
++        }
++      ],
++      "license": "MIT",
++      "dependencies": {
++        "ret": "~0.5.0"
++      },
++      "bin": {
++        "safe-regex2": "bin/safe-regex2.js"
++      }
++    },
++    "node_modules/safe-stable-stringify": {
++      "version": "2.5.0",
++      "resolved": "https://registry.npmjs.org/safe-stable-stringify/-/safe-stable-stringify-2.5.0.tgz",
++      "integrity": "sha512-b3rppTKm9T+PsVCBEOUR46GWI7fdOs00VKZ1+9c1EWDaDMvjQc6tUwuFyIprgGgTcWoVHSKrU8H31ZHA2e0RHA==",
++      "license": "MIT",
++      "engines": {
++        "node": ">=10"
++      }
++    },
++    "node_modules/scheduler": {
++      "version": "0.28.0",
++      "resolved": "https://registry.npmjs.org/scheduler/-/scheduler-0.28.0.tgz",
++      "integrity": "sha512-juorfCmIkIw8tT+p5BXSm6PJjQF/ycEYmKyzURCIt/RaZIhL+PulbQ9Yu2z1HdOJDdqDTlxA1+xKBmHXJsczAw==",
++      "license": "MIT"
++    },
++    "node_modules/secure-json-parse": {
++      "version": "4.1.1",
++      "resolved": "https://registry.npmjs.org/secure-json-parse/-/secure-json-parse-4.1.1.tgz",
++      "integrity": "sha512-lnd81MQEZKjhW/Gd2TQqdd4XP6QYNdDW/EP+I7nTrFHP9y2LmaGPIHk9xsnzcOiEr1c39c/e84xFgGviQKBTRw==",
++      "funding": [
++        {
++          "type": "github",
++          "url": "https://github.com/sponsors/fastify"
++        },
++        {
++          "type": "opencollective",
++          "url": "https://opencollective.com/fastify"
++        }
++      ],
++      "license": "BSD-3-Clause"
++    },
++    "node_modules/semver": {
++      "version": "7.8.6",
++      "resolved": "https://registry.npmjs.org/semver/-/semver-7.8.6.tgz",
++      "integrity": "sha512-9lpSSU4Mly3mrtruwLs1eLK6+gzbzqeBFwRNjIjE+9LuDpWdYctrQlQ3ej1Ilgi7gknpsTRnPoLP8DpCHqHIJw==",
++      "license": "ISC",
++      "bin": {
++        "semver": "bin/semver.js"
++      },
++      "engines": {
++        "node": ">=10"
++      }
++    },
++    "node_modules/set-cookie-parser": {
++      "version": "3.2.3",
++      "resolved": "https://registry.npmjs.org/set-cookie-parser/-/set-cookie-parser-3.2.3.tgz",
++      "integrity": "sha512-bDO7NdAkLprNt3BNl3LAh0oVnOS5+WspzxOxiboo7vRIyTqj2pvFmNWYEFynSGQgpJ+7yG/9nc/aSG20UDBUpg==",
++      "license": "MIT"
++    },
++    "node_modules/sharp": {
++      "version": "0.35.5",
++      "resolved": "https://registry.npmjs.org/sharp/-/sharp-0.35.5.tgz",
++      "integrity": "sha512-Ywn4OnzGukp7CDMrp08RQ50YKmuwG47brZgIVPTvBaaAfQlRlygrRqSrxdCiL9M+LlzLBiJ68IR1QqvzHyjC7g==",
++      "license": "Apache-2.0",
++      "optional": true,
++      "dependencies": {
++        "@img/colour": "^1.1.0",
++        "detect-libc": "^2.1.2",
++        "semver": "^7.8.5"
++      },
++      "engines": {
++        "node": ">=20.9.0"
++      },
++      "funding": {
++        "url": "https://opencollective.com/libvips"
++      },
++      "optionalDependencies": {
++        "@img/sharp-darwin-arm64": "0.35.5",
++        "@img/sharp-darwin-x64": "0.35.5",
++        "@img/sharp-freebsd-wasm32": "0.35.5",
++        "@img/sharp-libvips-darwin-arm64": "1.3.4",
++        "@img/sharp-libvips-darwin-x64": "1.3.4",
++        "@img/sharp-libvips-linux-arm": "1.3.4",
++        "@img/sharp-libvips-linux-arm64": "1.3.4",
++        "@img/sharp-libvips-linux-ppc64": "1.3.4",
++        "@img/sharp-libvips-linux-riscv64": "1.3.4",
++        "@img/sharp-libvips-linux-s390x": "1.3.4",
++        "@img/sharp-libvips-linux-x64": "1.3.4",
++        "@img/sharp-libvips-linuxmusl-arm64": "1.3.4",
++        "@img/sharp-libvips-linuxmusl-x64": "1.3.4",
++        "@img/sharp-linux-arm": "0.35.5",
++        "@img/sharp-linux-arm64": "0.35.5",
++        "@img/sharp-linux-ppc64": "0.35.5",
++        "@img/sharp-linux-riscv64": "0.35.5",
++        "@img/sharp-linux-s390x": "0.35.5",
++        "@img/sharp-linux-x64": "0.35.5",
++        "@img/sharp-linuxmusl-arm64": "0.35.5",
++        "@img/sharp-linuxmusl-x64": "0.35.5",
++        "@img/sharp-webcontainers-wasm32": "0.35.5",
++        "@img/sharp-win32-arm64": "0.35.5",
++        "@img/sharp-win32-ia32": "0.35.5",
++        "@img/sharp-win32-x64": "0.35.5"
++      },
++      "peerDependenciesMeta": {
++        "@types/node": {
++          "optional": true
++        }
++      }
++    },
++    "node_modules/sonic-boom": {
++      "version": "4.2.1",
++      "resolved": "https://registry.npmjs.org/sonic-boom/-/sonic-boom-4.2.1.tgz",
++      "integrity": "sha512-w6AxtubXa2wTXAUsZMMWERrsIRAdrK0Sc+FUytWvYAhBJLyuI4llrMIC1DtlNSdI99EI86KZum2MMq3EAZlF9Q==",
++      "license": "MIT",
++      "dependencies": {
++        "atomic-sleep": "^1.0.0"
++      }
++    },
++    "node_modules/source-map-js": {
++      "version": "1.2.4",
++      "resolved": "https://registry.npmjs.org/source-map-js/-/source-map-js-1.2.4.tgz",
++      "integrity": "sha512-J7ZjMvHd9O1fcT/5V09QWaaSl2BbWx3F6O08spde82Namf9UB0GxRVIPiNbVsdKkoizHiSpTodo3vp2bAy91MA==",
++      "license": "BSD-3-Clause",
++      "engines": {
++        "node": ">=6.0.0"
++      }
++    },
++    "node_modules/split2": {
++      "version": "4.2.0",
++      "resolved": "https://registry.npmjs.org/split2/-/split2-4.2.0.tgz",
++      "integrity": "sha512-UcjcJOWknrNkF6PLX83qcHM6KHgVKNkV62Y8a5uYDVv9ydGQVwAHMKqHdJje1VTWpljG0WYpCDhrCdAOYH4TWg==",
++      "license": "ISC",
++      "engines": {
++        "node": ">= 10.x"
++      }
++    },
++    "node_modules/styled-jsx": {
++      "version": "5.1.6",
++      "resolved": "https://registry.npmjs.org/styled-jsx/-/styled-jsx-5.1.6.tgz",
++      "integrity": "sha512-qSVyDTeMotdvQYoHWLNGwRFJHC+i+ZvdBRYosOFgC+Wg1vx4frN2/RG/NA7SYqqvKNLf39P2LSRA2pu6n0XYZA==",
++      "license": "MIT",
++      "dependencies": {
++        "client-only": "0.0.1"
++      },
++      "engines": {
++        "node": ">= 12.0.0"
++      },
++      "peerDependencies": {
++        "react": ">= 16.8.0 || 17.x.x || ^18.0.0-0 || ^19.0.0-0"
++      },
++      "peerDependenciesMeta": {
++        "@babel/core": {
++          "optional": true
++        },
++        "babel-plugin-macros": {
++          "optional": true
++        }
++      }
++    },
++    "node_modules/thread-stream": {
++      "version": "4.2.1",
++      "resolved": "https://registry.npmjs.org/thread-stream/-/thread-stream-4.2.1.tgz",
++      "integrity": "sha512-Stg6edJXC/6/xqGwSXwFokrUhChJ18amEjpKH89WrQQ0oVFDF+pUUcTpiwWhFUrE89Vf16FBOlwhaw+lescxMQ==",
++      "license": "MIT",
++      "dependencies": {
++        "real-require": "^1.0.0"
++      },
++      "engines": {
++        "node": ">=20"
++      }
++    },
++    "node_modules/toad-cache": {
++      "version": "3.7.4",
++      "resolved": "https://registry.npmjs.org/toad-cache/-/toad-cache-3.7.4.tgz",
++      "integrity": "sha512-m1TdR/rvT7kgGJZhspNtXdsdYk0fddFpJJFlG5s+UkPFo6lkLoZ3YLOaovPYjq1R75NP5JfeTlSHaOsE09peCg==",
++      "license": "MIT",
++      "engines": {
++        "node": ">=20"
++      }
++    },
++    "node_modules/tslib": {
++      "version": "2.9.1",
++      "resolved": "https://registry.npmjs.org/tslib/-/tslib-2.9.1.tgz",
++      "integrity": "sha512-a4Ux9VKuIMHsOS7ENbEq6hK2ZGYIT27Rtl0E4eD9KqwxhKiQeMZE/9xb3IdYwWaSOyIBQLExhQgXDTYoiCxnWA==",
++      "license": "0BSD"
++    },
++    "node_modules/typescript": {
++      "version": "5.9.3",
++      "resolved": "https://registry.npmjs.org/typescript/-/typescript-5.9.3.tgz",
++      "integrity": "sha512-jl1vZzPDinLr9eUt3J/t7V6FgNEw9QjvBPdysz9KfQDD41fQrC2Y4vKQdiaUpFT4bXlb1RHhLpp8wtm6M5TgSw==",
++      "dev": true,
++      "license": "Apache-2.0",
++      "bin": {
++        "tsc": "bin/tsc",
++        "tsserver": "bin/tsserver"
++      },
++      "engines": {
++        "node": ">=14.17"
++      }
++    },
++    "node_modules/undici-types": {
++      "version": "7.24.6",
++      "resolved": "https://registry.npmjs.org/undici-types/-/undici-types-7.24.6.tgz",
++      "integrity": "sha512-WRNW+sJgj5OBN4/0JpHFqtqzhpbnV0GuB+OozA9gCL7a993SmU+1JBZCzLNxYsbMfIeDL+lTsphD5jN5N+n0zg==",
++      "dev": true,
++      "license": "MIT"
++    }
++  }
++}
+diff --git a/package.json b/package.json
+new file mode 100644
+index 0000000..0d399cb
+--- /dev/null
++++ b/package.json
+@@ -0,0 +1,29 @@
++{
++  "name": "rides-service",
++  "version": "0.1.0",
++  "private": true,
++  "type": "module",
++  "engines": {
++    "node": "24.x"
++  },
++  "scripts": {
++    "dev": "next dev",
++    "start": "next start",
++    "typecheck": "tsc --noEmit",
++    "test": "node --test",
++    "build": "next build --webpack",
++    "api:dev": "node --watch src/server.ts"
++  },
++  "dependencies": {
++    "fastify": "^5.12.8",
++    "next": "^16.4.6",
++    "react": "^19.3.1",
++    "react-dom": "^19.3.1"
++  },
++  "devDependencies": {
++    "@types/node": "^24.19.2",
++    "@types/react": "^19.3.0",
++    "@types/react-dom": "^19.3.0",
++    "typescript": "5.9"
++  }
++}
+diff --git a/public/icon-192.png b/public/icon-192.png
+new file mode 100644
+index 0000000000000000000000000000000000000000..3f551c1b341323f6bfbddc6187519dfb167d623b
+GIT binary patch
+literal 871
+zcmeAS@N?(olHy`uVBq!ia0vp^2SAvE2}s`E_d9@rfmzSf#WAE}&f7}|b43$*S}&G3
+zs$OyUUmbSEfl=p%qH5QUkDG1nF5NsY`~Uv!?eg~@?%%srKf#nyP*6aS-bAGEh4uIC
+z!?W!dH2hK)n9#tYvS98levJkHI9OB^7&$YRe`DraVb7GynX%~GZLW;%BojwIpNWrf
+zbZ8d~6S%OjRg|S9BaxL+Hi||<^W-noyxlH(ArCLX^p;&Dpq_<E2<YD}!M_<<ugEt7
+zeXhXx_DY=t<5zbDpwB%VthdSsIIOR>Tw61*Vc(D9>rz4&uGfDIac27UOMhOLhl8rT
+z=mm?|^(z+kbFTPsSzJme;Nfys6OZ@5Ghf&;X~}<h)5h|pi<dvo!(sgmg#~ra^L(BE
+z3tV_T&1RD#<KDcJ%F;p?ypMCNIJ@Qgr3>*)Su?&YX=Ax!@Y0i)b4B{phPd1}%Ch+$
+z4s&nIU6{~dwVm@tX`B7|n?NP|3rd}tqzsGlL1d6a@%^;Z=a%wvW?Z<^3n#BdG4@tZ
+zDs3(|RawwE`}Xwuc@1iLdGY@$nWU_$5B)eVaN*8V=Wq2s4vUYU|JnMTBjd{t%l#kb
+mnKBwqZs_3X=%6F<htW_~+}Ckl`~zSHV(@hJb6Mw<&;$S;gh~?t
+
+literal 0
+HcmV?d00001
+
+diff --git a/public/icon-512.png b/public/icon-512.png
+new file mode 100644
+index 0000000000000000000000000000000000000000..c59acb211a84272d40a438a6f53f0ee6cac54df6
+GIT binary patch
+literal 4063
+zcmeHKYc$kp82>ja*C>}<!i3zG4J|uJC<@UimUJRom)VU>?um>d_siKhl~zri&{~_z
+zY8N9j$Sg%zrRijfMyM4-6NZ^)_I>7@{k9+XL+$bD|NhVWd!Og`{GR81-uKNtNOapE
+zrzMAB*ai=GS04<+p&<^FflrE-%N-0;s`7B%{mtp}nc<GYz;M;fLnNyoHfHcf8}--Y
+zLXOKG2{F%qTXrU4+TA$)X)A@bG%+(x#uQeR#p^Iv8LZu84W?m;VYk*|A*C2rpp2y-
+z!eN&CF>Igg>g4Ao0`24c6gMi5u}g7ddi1=ezM*K*))}KQNjatbk#TIzo6S@`9}c-#
+zYVD1qsafv1pFXfzPjoRCf_XKT#rHJYgM!J<*ut?WlR?4Y6{B+)Vfqk^?JDqJ<jIH~
+z3z)U>1kvu_(6+sl@<<t^v^0?}nmE=d(M{puxzHAtxkSxX_^L9BpK1~OUw8fI)sO%C
+zGvm60_k8i-LW{;W>;<QHVQz0eC7WjPhbkOaccuo82z{TNwMvw6ZsJGz^&JsLTBliW
+zhQA2EDD+pFM(9^TJ+0$}=C6Ed(~r??BV;DS&pK?LJS2GAydU*G*3Xel4z+S+I;I$l
+z&-eCYWip*S1=6oIkc-i3+Q&Rf*`iX9A#U(Xx^JOCO>8So*CT)ncblTa!f`ggKzl1P
+zD(^=Noae?(dioqdMyINie&<l%^j)sFjEoNWE<`aILzTrI24J-6uSa>5%Fxjgdt}tn
+zYbHZYe6X8t90VQrilTzQ@aPLc#a%eo{AdmS^8*R*Yu={<)Pqp<g{Y-AEkKuud@Q}`
+zBQhD!hLw6tWDy<Rpy$<mx1GY1$wttwZ-pADiKCmGEW8a6JJ0y2o1D=Zq59+@$>Bcx
+z$XEFInz+*;8|V!_NY10QT`2BTfw<ORV^{H6TbBE~z$_M|Q^l9oUhWT*{ORac@d@nZ
+zCl!EPVIQmHlgd|~r#eDDu8)+ciVGs~<=&ujYg}3}CpdN{gI5MFlQu7!h^(X;c2pO{
+z-HjAhz!{C>HS+$1$(VhYOhmg#3<o@9WGaG`#i7P8_VQw2GP)|lMC5nb$q~OBO*TcG
+z$lwGg2nD=Yki<GtN>yA>Y?lXi4;5;?g(LQB>hzI+v&I(3`GIM<dzp~dzR3?=PIWGG
+z%8*Bk##R+^r(%Zy7SYYQM4>_JIxbY$_zp+=dG0&yd!UO&FQ3!JXw09}1y5#^MxyGV
+zOfjUF#AG`x%k{dwIt(&YJ-eEX|5mtNSdJDc<=sr?>y>9wA%8XvI|djR9?u0s90z{!
+zV%h~}<Kd7swX#y1I<+;;9T`jNqTdbdI>#qKZEO<w#H$iGcv#?C;K>Rq&*cKk^8uG?
+zTbor!p_-R1%@S_Mn2JDU-f@4ey77QiNb<;W-~CFjkKL1XZsniSC>@fr(<I{tx6`$r
+zRxIr!W+8HQSvJ*<B{hX$<$<N)Fe$b<1_V)0toY~?-Q<PXba&>UtH6llD$ro5PnexZ
+z{SnBRn)ei@w2VP*QDu2ClVRI!fjp@*HIR1Ipmr0oSXi&qtvFTW3-GN9-3|BcCSaci
+zOV`A36NxR5cUH%VatCT;5s34>rKa(~)C~iGtG{Co%hTTC5FEcQG=`rOedapiTYSEu
+z`K%kM4K!Ep@L|($^}d9t<3f!3sYBsP5Qm+miaaZxT?1z1qq=%_zgXG^W^htgu?LME
+zJ<!s_?e_23Pjb0HQmtOmmy|FO3UHj){paC2E6NBi7LQ!`t(Ud{`&=|dkjv;!nEnc3
+zgac&NuesA~$&Pm#)sK3~Vv>P9qs{Khu7-R(?0rf~TzzV|8`&6*#mPr4)4ofp1Dcf6
+zE@*sPG8QMAjXfof!fi`D<KNyA#DLBq9zKwspMtf4C(5jt%X#T+0c=VHyqz?{palI|
+zB%Gbq`~YP`X{OLyQ)DG@?hKjxLDxkBCkqBz>D>tac|Ay0+5Yp8{)vH^J$u!YqjT{j
+QdbndAdx@^KdqU3t4a$0OhX4Qo
+
+literal 0
+HcmV?d00001
+
+diff --git a/src/app.ts b/src/app.ts
+new file mode 100644
+index 0000000..2a582a4
+--- /dev/null
++++ b/src/app.ts
+@@ -0,0 +1,40 @@
++import Fastify from 'fastify';
++
++export function buildApp(logger = false) {
++  const app = Fastify({
++    logger,
++    ajv: { customOptions: { removeAdditional: false } },
++  });
++
++  app.setErrorHandler((error, request, reply) => {
++    if (typeof error === 'object' && error !== null && 'validation' in error) {
++      return reply.code(400).send({
++        error: { code: 'VALIDATION_ERROR', message: 'Invalid request.' },
++      });
++    }
++
++    const status = typeof error === 'object' && error !== null && 'statusCode' in error
++      ? error.statusCode
++      : undefined;
++    if (typeof status === 'number' && status >= 400 && status < 500) {
++      return reply.code(status).send({
++        error: { code: 'REQUEST_ERROR', message: 'The request could not be processed.' },
++      });
++    }
++
++    request.log.error({ err: error }, 'Unhandled request error');
++    return reply.code(500).send({
++      error: { code: 'INTERNAL_ERROR', message: 'An unexpected error occurred.' },
++    });
++  });
++
++  app.setNotFoundHandler((_request, reply) => reply.code(404).send({
++    error: { code: 'NOT_FOUND', message: 'Route not found.' },
++  }));
++
++  app.get('/health', {
++    schema: { querystring: { type: 'object', additionalProperties: false } },
++  }, async () => ({ status: 'ok' }));
++
++  return app;
++}
+diff --git a/src/server.ts b/src/server.ts
+new file mode 100644
+index 0000000..feb753d
+--- /dev/null
++++ b/src/server.ts
+@@ -0,0 +1,15 @@
++import { buildApp } from './app.ts';
++
++const app = buildApp(true);
++
++try {
++  const port = Number(process.env.PORT ?? '3000');
++  if (!Number.isInteger(port) || port < 1 || port > 65535) {
++    throw new Error('PORT must be an integer from 1 through 65535.');
++  }
++  await app.listen({ port, host: process.env.HOST ?? '127.0.0.1' });
++} catch (error) {
++  app.log.error(error);
++  process.exitCode = 1;
++  await app.close();
++}
+diff --git a/test/app.test.ts b/test/app.test.ts
+new file mode 100644
+index 0000000..4ab6d20
+--- /dev/null
++++ b/test/app.test.ts
+@@ -0,0 +1,42 @@
++import assert from 'node:assert/strict';
++import test from 'node:test';
++import { buildApp } from '../src/app.ts';
++
++test('health reports that the service is up', async (context) => {
++  const app = buildApp();
++  context.after(() => app.close());
++  const response = await app.inject('/health');
++  assert.equal(response.statusCode, 200);
++  assert.deepEqual(response.json(), { status: 'ok' });
++});
++
++test('invalid query parameters return a structured 400', async (context) => {
++  const app = buildApp();
++  context.after(() => app.close());
++  const response = await app.inject('/health?unknown=yes');
++  assert.equal(response.statusCode, 400);
++  assert.deepEqual(response.json(), {
++    error: { code: 'VALIDATION_ERROR', message: 'Invalid request.' },
++  });
++});
++
++test('unknown routes return a structured 404', async (context) => {
++  const app = buildApp();
++  context.after(() => app.close());
++  const response = await app.inject('/missing');
++  assert.equal(response.statusCode, 404);
++  assert.deepEqual(response.json(), {
++    error: { code: 'NOT_FOUND', message: 'Route not found.' },
++  });
++});
++
++test('unexpected errors return a generic 500', async (context) => {
++  const app = buildApp();
++  context.after(() => app.close());
++  app.get('/failure', async () => { throw new Error('internal detail'); });
++  const response = await app.inject('/failure');
++  assert.equal(response.statusCode, 500);
++  assert.deepEqual(response.json(), {
++    error: { code: 'INTERNAL_ERROR', message: 'An unexpected error occurred.' },
++  });
++});
+diff --git a/test/demo.test.ts b/test/demo.test.ts
+new file mode 100644
+index 0000000..485d652
+--- /dev/null
++++ b/test/demo.test.ts
+@@ -0,0 +1,22 @@
++import assert from 'node:assert/strict';
++import test from 'node:test';
++import { nextStatus, quoteRide, steps } from '../lib/demo.ts';
++
++test('demo quotes include duration and reconcile in MAD minor units', () => {
++  const quote = quoteRide('port', 'maarif');
++  assert.ok(quote);
++  assert.equal(quote.pickup.id, 'port');
++  assert.equal(quote.dropoff.id, 'maarif');
++  assert.ok(quote.minutes > 0);
++  assert.ok(Number.isInteger(quote.totalMinor));
++  assert.equal(quote.totalMinor, quote.baseMinor + quote.distanceMinor);
++});
++
++test('demo quotes reject identical and unknown stops', () => {
++  assert.equal(quoteRide('port', 'port'), null);
++  assert.equal(quoteRide('unknown', 'port'), null);
++});
++
++test('demo tracking advances in sequence and completion is terminal', () => {
++  assert.deepEqual(steps.map(nextStatus), ['approaching', 'onboard', 'completed', 'completed']);
++});
+diff --git a/tsconfig.json b/tsconfig.json
+new file mode 100644
+index 0000000..92e584b
+--- /dev/null
++++ b/tsconfig.json
+@@ -0,0 +1,44 @@
++{
++  "compilerOptions": {
++    "target": "ES2024",
++    "module": "ESNext",
++    "strict": true,
++    "noEmit": true,
++    "allowImportingTsExtensions": true,
++    "erasableSyntaxOnly": true,
++    "verbatimModuleSyntax": true,
++    "types": [
++      "node"
++    ],
++    "lib": [
++      "dom",
++      "dom.iterable",
++      "esnext"
++    ],
++    "skipLibCheck": true,
++    "incremental": true,
++    "esModuleInterop": true,
++    "moduleResolution": "bundler",
++    "resolveJsonModule": true,
++    "jsx": "react-jsx",
++    "plugins": [
++      {
++        "name": "next"
++      }
++    ],
++    "allowJs": true
++  },
++  "include": [
++    "next-env.d.ts",
++    "app/**/*.tsx",
++    "app/**/*.ts",
++    "lib/**/*.ts",
++    "src/**/*.ts",
++    "test/**/*.ts",
++    ".next/types/**/*.ts",
++    ".next/dev/types/**/*.ts"
++  ],
++  "exclude": [
++    "node_modules"
++  ]
++}
